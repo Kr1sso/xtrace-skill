@@ -4,13 +4,13 @@ Unix-style profiling tools for macOS Instruments. Record traces, analyze hotspot
 
 ```bash
 # Profile any command. Just prefix it.
-trace ./my_app --benchmark
+xtrace ./my_app --benchmark
 
 # Pipe to a flamegraph
-trace ./my_app | trace-flamegraph - --open
+xtrace ./my_app | trace-flamegraph - --open
 
 # Build → profile → interactive analysis
-cmake --build . && trace ./my_app | trace-speedscope -
+cmake --build . && xtrace ./my_app | trace-speedscope -
 ```
 
 ## Why
@@ -19,7 +19,7 @@ Apple's Instruments is powerful but GUI-only. `xctrace` exists but is raw and ha
 
 **xtrace** bridges this gap:
 
-- **`trace`** — prefix any command to profile it, like `time`
+- **`xtrace`** — prefix any command to profile it, like `time`
 - **All tools pipe together** — record → analyze → visualize in one pipeline
 - **Multiple output formats** — text summaries for terminals/LLMs, JSON for scripts, SVG flamegraphs for humans, speedscope for deep analysis
 - **Time-resolved analysis** — don't just see averages, see how CPU usage changes over time with sparklines, confidence indicators, and automatic phase detection
@@ -42,7 +42,7 @@ cd xtrace-skill
 export PATH="$HOME/Work/xtrace-skill/scripts:$PATH"
 ```
 
-Now `trace`, `trace-flamegraph`, `trace-analyze.py`, etc. work from anywhere.
+Now `xtrace`, `trace-flamegraph`, `trace-analyze.py`, etc. work from anywhere.
 
 ### 3. Install optional tools (recommended)
 
@@ -67,23 +67,23 @@ npm install -g speedscope    # Interactive web UI (sandwich view, time-ordered, 
 
 ```bash
 # Profile a command for 10 seconds
-trace -d 10 ./my_app
+xtrace -d 10 ./my_app
 
 # The summary prints to stderr, the trace path prints to stdout.
 # Pipe to any visualization tool:
-trace ./my_app | trace-flamegraph - --open      # flamegraph in browser
-trace ./my_app | trace-speedscope -             # interactive analysis
-trace ./my_app | trace-analyze.py summary -     # text summary
+xtrace ./my_app | trace-flamegraph - --open      # flamegraph in browser
+xtrace ./my_app | trace-speedscope -             # interactive analysis
+xtrace ./my_app | trace-analyze.py summary -     # text summary
 ```
 
 ## Tools
 
-### `trace` — The Main Entry Point
+### `xtrace` — The Main Entry Point
 
 Works like `time`. Prefix any command to profile it.
 
 ```bash
-trace [options] command [args...]
+xtrace [options] command [args...]
 ```
 
 | Option | Description |
@@ -98,19 +98,19 @@ trace [options] command [args...]
 
 ```bash
 # Save the trace path for later use
-TRACE=$(trace -d 10 ./my_app)
+TRACE=$(xtrace -d 10 ./my_app)
 trace-analyze.py calltree "$TRACE" --depth 15
 trace-flamegraph.sh "$TRACE" -w 2400 --open
 
 # Build → profile in one line
-make -j8 && trace ./build/app | trace-flamegraph - --open
+make -j8 && xtrace ./build/app | trace-flamegraph - --open
 ```
 
 ---
 
 ### `trace-record.sh` — Full Recording Control
 
-When you need more than `trace` offers: attach to processes, system-wide tracing, environment variables, different templates.
+When you need more than `xtrace` offers: attach to processes, system-wide tracing, environment variables, different templates.
 
 ```bash
 trace-record.sh [options] [-- command args...]
@@ -383,7 +383,7 @@ Without debug symbols, you'll see hex addresses instead of function names. How t
 cmake --build . --config RelWithDebInfo
 
 # 2. Profile
-TRACE=$(trace -d 10 ./build/my_app --benchmark)
+TRACE=$(xtrace -d 10 ./build/my_app --benchmark)
 
 # 3. Identify the hotspot
 trace-analyze.py summary "$TRACE" --top 10
@@ -409,7 +409,7 @@ trace-diff-flamegraph.sh "$TRACE" "$TRACE_AFTER" --open
 ### Drill Into a Spike
 
 ```bash
-TRACE=$(trace -d 10 ./my_app)
+TRACE=$(xtrace -d 10 ./my_app)
 
 # See the timeline — where does it spike?
 trace-analyze.py timeline "$TRACE" --window 100ms
@@ -433,7 +433,7 @@ trace-record.sh -d 10 -n Safari | trace-speedscope.sh -
 
 ```bash
 # Machine-readable JSON output
-TRACE=$(trace --no-summary -d 10 ./my_app)
+TRACE=$(xtrace --no-summary -d 10 ./my_app)
 trace-analyze.py summary "$TRACE" --json --top 20 > profile.json
 
 # The JSON contains:
@@ -452,7 +452,7 @@ trace-analyze.py summary "$TRACE" --json --top 20 > profile.json
 ## Architecture
 
 ```
-trace (entry point)
+xtrace (entry point)
   └── trace-record.sh (xctrace wrapper)
         └── xctrace record (Apple's tool)
               └── .trace file

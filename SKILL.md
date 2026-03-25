@@ -7,22 +7,22 @@ description: "Profile macOS applications using Instruments/xctrace from the comm
 
 Unix-style CPU profiling for macOS. Composable tools that pipe together.
 
-## The `trace` Command
+## The `xtrace` Command
 
-**Profile any command — just prefix it with `trace`, like `time`.**
+**Profile any command — just prefix it with `xtrace`, like `time`.**
 
 ```bash
-trace ./my_app --benchmark
+xtrace ./my_app --benchmark
 ```
 
 This records a trace, prints a summary to stderr, and outputs the trace path to stdout. Pipe it to anything:
 
 ```bash
-trace ./my_app | trace-flamegraph -            # → flamegraph SVG
-trace ./my_app | trace-speedscope -            # → interactive UI in browser
-trace -d 5 ./my_app | trace-flamegraph - --open  # 5s trace, open in browser
-cmake --build . && trace ./my_app              # build then profile
-TRACE=$(trace ./my_app)                        # save path for later
+xtrace ./my_app | trace-flamegraph -            # → flamegraph SVG
+xtrace ./my_app | trace-speedscope -            # → interactive UI in browser
+xtrace -d 5 ./my_app | trace-flamegraph - --open  # 5s trace, open in browser
+cmake --build . && xtrace ./my_app              # build then profile
+TRACE=$(xtrace ./my_app)                        # save path for later
 ```
 
 All tools accept `-` to read the trace path from stdin.
@@ -31,7 +31,7 @@ All tools accept `-` to read the trace path from stdin.
 
 | Script | Stdin | Purpose |
 |---|---|---|
-| **`trace`** | — | **Record + summarize.** Prefix any command. Path to stdout. |
+| **`xtrace`** | — | **Record + summarize.** Prefix any command. Path to stdout. |
 | `trace-record.sh` | — | Record only (more options: attach, system-wide, template) |
 | `trace-analyze.py` | `-` | **Analysis engine**: summary, timeline, calltree, collapsed, diff |
 | `trace-flamegraph.sh` | `-` | Flamegraph SVG (auto-picks inferno > flamegraph.pl > builtin) |
@@ -69,13 +69,13 @@ The typical profile-guided optimization loop:
 cmake --build . --config Release
 
 # 2. Profile it
-trace -d 10 ./build/my_app --benchmark | trace-flamegraph - --open
+xtrace -d 10 ./build/my_app --benchmark | trace-flamegraph - --open
 
 # 3. Read the summary (printed to stderr), identify the hotspot
 #    → "computeHash() is 24% self time"
 
 # 4. Fix the hotspot, rebuild, re-profile
-cmake --build . && trace -d 10 ./build/my_app --benchmark > /tmp/after.trace
+cmake --build . && xtrace -d 10 ./build/my_app --benchmark > /tmp/after.trace
 
 # 5. Compare before vs after
 ./scripts/trace-analyze.py diff /tmp/before.json /tmp/after.json
@@ -88,7 +88,7 @@ When an LLM is optimizing code:
 
 ```bash
 # Profile and get machine-readable output
-TRACE=$(./scripts/trace -d 10 --no-summary ./build/my_app)
+TRACE=$(./scripts/xtrace -d 10 --no-summary ./build/my_app)
 ./scripts/trace-analyze.py summary "$TRACE" --json --top 20 > profile.json
 ./scripts/trace-analyze.py calltree "$TRACE" --min-pct 3.0
 
@@ -97,7 +97,7 @@ TRACE=$(./scripts/trace -d 10 --no-summary ./build/my_app)
 
 ## Recording Options
 
-`trace` handles the simple case. For more control, use `trace-record.sh`:
+`xtrace` handles the simple case. For more control, use `trace-record.sh`:
 
 ```bash
 # Attach to a running process
@@ -166,7 +166,7 @@ Buckets with sparklines and confidence: `██` high, `▓░` medium, `░░`
 
 ```bash
 # One-shot: record + flamegraph
-trace ./my_app | trace-flamegraph - --open
+xtrace ./my_app | trace-flamegraph - --open
 
 # From existing trace
 ./scripts/trace-flamegraph.sh recording.trace -w 2400 --open
@@ -178,22 +178,22 @@ trace ./my_app | trace-flamegraph - --open
 ./scripts/trace-diff-flamegraph.sh before.trace after.trace --open
 
 # Interactive (speedscope — best for human analysis)
-trace ./my_app | trace-speedscope -
+xtrace ./my_app | trace-speedscope -
 ```
 
 ## Pipe Examples
 
 ```bash
 # Build → profile → flamegraph
-make -j8 && trace ./build/app | trace-flamegraph - -o profile.svg --open
+make -j8 && xtrace ./build/app | trace-flamegraph - -o profile.svg --open
 
 # Profile → drill into spike → flamegraph of just that window
-TRACE=$(trace -d 10 ./my_app)
+TRACE=$(xtrace -d 10 ./my_app)
 ./scripts/trace-analyze.py timeline "$TRACE" --window 100ms
 ./scripts/trace-flamegraph.sh "$TRACE" --time-range 3.2s-3.5s --open
 
 # Profile → JSON summary for scripting
-trace --no-summary ./my_app | xargs ./scripts/trace-analyze.py summary --json >profile.json
+xtrace --no-summary ./my_app | xargs ./scripts/trace-analyze.py summary --json >profile.json
 
 # Quick check with sample (no Xcode needed)
 ./scripts/sample-quick.sh MyApp 5

@@ -1,21 +1,21 @@
 #!/bin/bash
-# trace — Profile any command. Works like `time` — just prefix your command.
+# xtrace — Profile any command. Works like `time` — just prefix your command.
 #
 # Records a trace, prints summary to stderr, outputs trace path to stdout.
 # Pipe the path to any analysis tool.
 #
 # Usage:
-#   trace ./my_app --benchmark
-#   cmake --build . && trace ./my_app
+# xtrace ./my_app --benchmark
+#   cmake --build . && xtrace ./my_app
 #   trace -d 5 ./my_app | trace-flamegraph -
-#   trace ./my_app | trace-speedscope -
-#   TRACE=$(trace ./my_app)
+# xtrace ./my_app | trace-speedscope -
+# TRACE=$(xtrace ./my_app)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 usage() {
     cat >&2 <<'EOF'
-Usage: trace [options] command [args...]
+Usage: xtrace [options] command [args...]
 
 Profile any command. Like `time`, just prefix your command.
 
@@ -31,11 +31,11 @@ Options:
   -h, --help      Show this help
 
 Pipe to other tools:
-  trace ./app | trace-flamegraph -          # flamegraph
-  trace ./app | trace-speedscope -          # interactive UI
-  trace ./app | xargs trace-analyze summary # full analysis
-  cmake --build . && trace ./app            # build then profile
-  TRACE=$(trace ./app); trace-analyze summary $TRACE  # save path
+  xtrace ./app | trace-flamegraph -          # flamegraph
+  xtrace ./app | trace-speedscope -          # interactive UI
+  xtrace ./app | xargs trace-analyze summary # full analysis
+  cmake --build . && xtrace ./app            # build then profile
+  TRACE=$(xtrace ./app); trace-analyze summary $TRACE  # save path
 
 EOF
     exit "${1:-1}"
