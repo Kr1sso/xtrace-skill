@@ -17,6 +17,8 @@ Options:
   -o, --output PATH       Output .trace path (auto-generated if omitted)
   -p, --pid PID           Attach to process by PID
   -n, --name NAME         Attach to process by name
+  --wait-for NAME         Wait for a process to spawn, then attach
+  --wait-timeout SECS     Max seconds to wait (default: 30)
   -a, --all               Trace all processes (system-wide)
   -e, --env KEY=VAL       Environment variable for launched process (repeatable)
   --stdout                Forward target stdout to terminal
@@ -28,6 +30,7 @@ Examples:
   trace-record.sh -d 5 -p 12345
   trace-record.sh -t 'System Trace' -d 10 -n MyApp
   trace-record.sh -d 10 -a
+  trace-record.sh --wait-for MyApp -d 10       # wait for MyApp to spawn, then profile
   trace-record.sh -t 'Processor Trace' -d 3 -- ./my_binary
   trace-record.sh -e DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib -- ./app
 
@@ -45,6 +48,8 @@ DURATION="10s"
 OUTPUT=""
 PID=""
 NAME=""
+WAIT_FOR=""
+WAIT_TIMEOUT=30
 ALL_PROCS=false
 ENV_VARS=()
 FORWARD_STDOUT=false
@@ -64,6 +69,10 @@ while [[ $# -gt 0 ]]; do
             PID="$2"; shift 2 ;;
         -n|--name)
             NAME="$2"; shift 2 ;;
+        --wait-for)
+            WAIT_FOR="$2"; shift 2 ;;
+        --wait-timeout)
+            WAIT_TIMEOUT="$2"; shift 2 ;;
         -a|--all)
             ALL_PROCS=true; shift ;;
         -e|--env)
@@ -90,17 +99,42 @@ done
 MODE_COUNT=0
 [ -n "$PID" ] && ((MODE_COUNT++))
 [ -n "$NAME" ] && ((MODE_COUNT++))
+[ -n "$WAIT_FOR" ] && ((MODE_COUNT++))
 [ "$ALL_PROCS" = true ] && ((MODE_COUNT++))
 [ ${#LAUNCH_CMD[@]} -gt 0 ] && ((MODE_COUNT++))
 
 if [ "$MODE_COUNT" -eq 0 ]; then
-    echo "Error: No target specified. Use one of: --pid, --name, --all, or -- <command>" >&2
+    echo "Error: No target specified. Use one of: --pid, --name, --wait-for, --all, or -- <command>" >&2
     usage 1
 fi
 
 if [ "$MODE_COUNT" -gt 1 ]; then
-    echo "Error: Multiple targets specified. Use exactly one of: --pid, --name, --all, or -- <command>" >&2
+    echo "Error: Multiple targets specified. Use exactly one of: --pid, --name, --wait-for, --all, or -- <command>" >&2
     exit 1
+fi
+
+# ── Wait-for mode: poll until process appears ────────────────────────────────
+if [ -n "$WAIT_FOR" ]; then
+    echo "Waiting for process '$WAIT_FOR' to appear (timeout: ${WAIT_TIMEOUT}s)..." >&2
+    ELAPSED=0
+    FOUND_PID=""
+    while [ "$ELAPSED" -lt "$WAIT_TIMEOUT" ]; do
+        FOUND_PID=$(pgrep -x "$WAIT_FOR" 2>/dev/null | head -1 || true)
+        if [ -z "$FOUND_PID" ]; then
+            FOUND_PID=$(pgrep -f "$WAIT_FOR" 2>/dev/null | head -1 || true)
+        fi
+        if [ -n "$FOUND_PID" ]; then
+            echo "Found '$WAIT_FOR' with PID $FOUND_PID" >&2
+            PID="$FOUND_PID"
+            break
+        fi
+        sleep 0.5
+        ELAPSED=$((ELAPSED + 1))
+    done
+    if [ -z "$FOUND_PID" ]; then
+        echo "Error: Timed out waiting for '$WAIT_FOR' after ${WAIT_TIMEOUT}s" >&2
+        exit 1
+    fi
 fi
 
 # ── Validate xctrace ────────────────────────────────────────────────────────

@@ -94,7 +94,7 @@ fi
 if [ -z "$OUTPUT" ]; then
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     SAFE_NAME=$(echo "$PROC_NAME" | tr -cs '[:alnum:]_-' '_')
-    OUTPUT="sample_${SAFE_NAME}_${TIMESTAMP}.txt"
+    OUTPUT="/tmp/sample_${SAFE_NAME}_${TIMESTAMP}.txt"
 fi
 
 # ── Run sample ───────────────────────────────────────────────────────────────

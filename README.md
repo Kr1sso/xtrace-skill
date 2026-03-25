@@ -28,33 +28,35 @@ Apple's Instruments is powerful but GUI-only. `xctrace` exists but is raw and ha
 
 ## Install
 
-### 1. Clone
+### Quick Install
 
 ```bash
 git clone https://github.com/YOUR_USER/xtrace-skill.git
 cd xtrace-skill
+./install.sh
 ```
 
-### 2. Add to PATH (optional but recommended)
+This symlinks all scripts to `~/.local/bin` (or the first writable PATH directory), and installs as a pi skill if pi is detected.
+
+### Manual Install
 
 ```bash
 # Add to your shell profile (~/.zshrc, ~/.bashrc)
 export PATH="$HOME/Work/xtrace-skill/scripts:$PATH"
 ```
 
-Now `xtrace`, `trace-flamegraph`, `trace-analyze.py`, etc. work from anywhere.
-
-### 3. Install optional tools (recommended)
+### Install optional tools (recommended)
 
 ```bash
 cargo install inferno        # Best flamegraph SVGs (click-to-zoom, search, hover)
 npm install -g speedscope    # Interactive web UI (sandwich view, time-ordered, zoom)
 ```
 
-### 4. Verify
+### Verify
 
 ```bash
-./scripts/trace-check.sh
+./scripts/trace-check.sh     # check environment
+./test.sh                    # run 37 end-to-end tests
 ```
 
 ### Requirements
@@ -123,6 +125,8 @@ trace-record.sh [options] [-- command args...]
 | `-o, --output PATH` | Output path (default: auto-timestamped) |
 | `-p, --pid PID` | Attach to running process by PID |
 | `-n, --name NAME` | Attach to running process by name |
+| `--wait-for NAME` | Wait for process to spawn, then attach |
+| `--wait-timeout SEC` | Max wait time (default: 30s) |
 | `-a, --all` | System-wide (all processes) |
 | `-e, --env K=V` | Environment variable (repeatable) |
 | `--stdout` | Forward target stdout |
@@ -132,6 +136,10 @@ trace-record.sh [options] [-- command args...]
 # Attach to a running process
 trace-record.sh -d 10 -p $(pgrep MyApp)
 trace-record.sh -d 10 -n Safari
+
+# Wait for a process to spawn (useful after kicking off a build)
+trace-record.sh --wait-for MyApp -d 10
+trace-record.sh --wait-for MyApp --wait-timeout 60 -d 10
 
 # System-wide profile
 trace-record.sh -d 10 -a

@@ -824,8 +824,14 @@ def _detect_phases(bucket_data, window_ns, min_time):
     boundaries.append(len(bucket_data))
 
     # Build phases
-    startup_keywords = {'dyld', 'objc', '_init', 'initialize', 'dlopen', 'ImageLoader', 'prepare'}
-    gc_keywords = {'gc', 'GC', 'collect', 'sweep', 'mark', 'scavenge'}
+    startup_keywords = {'dyld', 'objc', '_init', 'initialize', 'dlopen', 'ImageLoader',
+                        'prepare', 'setup', 'configure', 'bootstrap', 'load'}
+    gc_keywords = {'gc', 'GC', 'collect', 'sweep', 'mark', 'scavenge', 'garbage',
+                   'finalize', 'release_pool', 'autorelease'}
+    io_keywords = {'read', 'write', 'recv', 'send', 'poll', 'select', 'kevent',
+                   'io_poll', 'stream_io', 'socket', 'fsync', 'pread', 'pwrite'}
+    alloc_keywords = {'malloc', 'calloc', 'realloc', 'free', 'xzm_', 'mmap',
+                      'allocat', 'dealloc', 'szone_', 'nano_', 'new', 'delete'}
 
     phases = []
     for bi in range(len(boundaries) - 1):
@@ -846,15 +852,42 @@ def _detect_phases(bucket_data, window_ns, min_time):
         top_func = func_counter.most_common(1)[0][0] if func_counter else 'idle'
         top_pct = func_counter.most_common(1)[0][1] / total_count * 100 if total_count and func_counter else 0
 
-        # Label heuristic
-        top_names = set(f.lower() for f in func_counter)
-        label = 'Compute'
-        if any(kw in n for n in top_names for kw in startup_keywords):
-            label = 'Startup'
-        elif any(kw in n for n in top_names for kw in gc_keywords):
-            label = 'GC Spike'
-        elif total_count < len(phase_buckets) * 5:
+        # Label heuristic — check what fraction of samples match each category
+        top_names_lower = set(f.lower() for f in func_counter)
+        all_names_str = ' '.join(top_names_lower)
+
+        def keyword_score(keywords):
+            return sum(1 for kw in keywords if any(kw in n for n in top_names_lower))
+
+        scores = {
+            'Startup': keyword_score(startup_keywords),
+            'GC':      keyword_score(gc_keywords),
+            'I/O':     keyword_score(io_keywords),
+            'Alloc':   keyword_score(alloc_keywords),
+        }
+
+        # Check for idle (very few samples relative to bucket count)
+        avg_samples_per_bucket = total_count / max(len(phase_buckets), 1)
+
+        # Check for spikes
+        max_bucket = max((b['count'] for b in phase_buckets), default=0)
+        median_bucket = sorted(b['count'] for b in phase_buckets)[len(phase_buckets) // 2] if phase_buckets else 0
+
+        if total_count == 0 or avg_samples_per_bucket < 3:
             label = 'Idle'
+        elif max_bucket > 3 * median_bucket and len(phase_buckets) <= 3:
+            # Short burst with very high sample count
+            best_cat = max(scores, key=scores.get)
+            if scores[best_cat] >= 2:
+                label = f'{best_cat} Spike'
+            else:
+                label = 'CPU Spike'
+        else:
+            best_cat = max(scores, key=scores.get)
+            if scores[best_cat] >= 2:
+                label = best_cat
+            else:
+                label = 'Compute'
 
         desc = f"{top_func} at ~{top_pct:.0f}%"
         if total_count == 0:

@@ -104,6 +104,10 @@ TRACE=$(./scripts/xtrace -d 10 --no-summary ./build/my_app)
 ./scripts/trace-record.sh -d 10 -p <PID>
 ./scripts/trace-record.sh -d 10 -n MyApp
 
+# Wait for a process to spawn (e.g. after a build starts it), then attach
+./scripts/trace-record.sh --wait-for MyApp -d 10
+./scripts/trace-record.sh --wait-for MyApp --wait-timeout 60 -d 10
+
 # System-wide
 ./scripts/trace-record.sh -d 10 -a
 
