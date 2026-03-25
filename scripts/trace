@@ -1,0 +1,92 @@
+#!/bin/bash
+# trace — Profile any command. Works like `time` — just prefix your command.
+#
+# Records a trace, prints summary to stderr, outputs trace path to stdout.
+# Pipe the path to any analysis tool.
+#
+# Usage:
+#   trace ./my_app --benchmark
+#   cmake --build . && trace ./my_app
+#   trace -d 5 ./my_app | trace-flamegraph -
+#   trace ./my_app | trace-speedscope -
+#   TRACE=$(trace ./my_app)
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: trace [options] command [args...]
+
+Profile any command. Like `time`, just prefix your command.
+
+Records a Time Profiler trace, prints a summary to stderr,
+and outputs the trace file path to stdout for piping.
+
+Options:
+  -d DURATION     Recording duration (default: 30s, or until process exits)
+  -t TEMPLATE     Instruments template (default: 'Time Profiler')
+  -o PATH         Output .trace path (default: auto in /tmp)
+  --no-summary    Skip auto-summary, just output trace path
+  --top N         Number of functions in summary (default: 15)
+  -h, --help      Show this help
+
+Pipe to other tools:
+  trace ./app | trace-flamegraph -          # flamegraph
+  trace ./app | trace-speedscope -          # interactive UI
+  trace ./app | xargs trace-analyze summary # full analysis
+  cmake --build . && trace ./app            # build then profile
+  TRACE=$(trace ./app); trace-analyze summary $TRACE  # save path
+
+EOF
+    exit "${1:-1}"
+}
+
+DURATION="30s"
+TEMPLATE="Time Profiler"
+OUTPUT=""
+SUMMARIZE=true
+TOP=15
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d)            DURATION="$2"; shift 2 ;;
+        -t)            TEMPLATE="$2"; shift 2 ;;
+        -o)            OUTPUT="$2"; shift 2 ;;
+        --no-summary)  SUMMARIZE=false; shift ;;
+        --top)         TOP="$2"; shift 2 ;;
+        -h|--help)     usage 0 ;;
+        --)            shift; break ;;
+        -*)            break ;;  # pass unknown flags to the command
+        *)             break ;;
+    esac
+done
+
+CMD=("$@")
+
+if [ ${#CMD[@]} -eq 0 ]; then
+    echo "Error: No command specified." >&2
+    usage 1
+fi
+
+# Auto-generate output path in /tmp
+if [ -z "$OUTPUT" ]; then
+    BIN_NAME=$(basename "${CMD[0]}")
+    OUTPUT="/tmp/trace_${BIN_NAME}_$(date +%Y%m%d_%H%M%S).trace"
+fi
+
+# Record — trace-record.sh prints path to stdout, progress to stderr
+TRACE_PATH=$("$SCRIPT_DIR/trace-record.sh" -t "$TEMPLATE" -d "$DURATION" -o "$OUTPUT" -- "${CMD[@]}")
+
+if [ -z "$TRACE_PATH" ] || [ ! -e "$TRACE_PATH" ]; then
+    echo "Error: Recording failed." >&2
+    exit 1
+fi
+
+# Auto-summarize to stderr
+if [ "$SUMMARIZE" = true ]; then
+    echo "" >&2
+    python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top "$TOP" >&2
+fi
+
+# Output trace path to stdout (for piping)
+echo "$TRACE_PATH"
