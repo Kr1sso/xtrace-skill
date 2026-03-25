@@ -28,24 +28,28 @@ Apple's Instruments is powerful but GUI-only. `xctrace` exists but is raw and ha
 
 ## Install
 
-### Quick Install
-
 ```bash
-git clone https://github.com/YOUR_USER/xtrace-skill.git
+git clone https://github.com/Kr1sso/xtrace-skill.git
 cd xtrace-skill
 ./install.sh
 ```
 
-This symlinks all scripts to `~/.local/bin` (or the first writable PATH directory), and installs as a pi skill if pi is detected.
+This does three things:
 
-### Manual Install
+1. **Symlinks scripts to PATH** (`~/.local/bin`) — `xtrace`, `trace-record`, `trace-analyze.py`, etc.
+2. **Installs as an AI agent skill** — Pi, Cursor, and Claude Code all use the same `SKILL.md` format. The installer symlinks this repo into each agent's skills directory.
+3. **Checks for optional tools** — inferno and speedscope for best visualizations.
 
-```bash
-# Add to your shell profile (~/.zshrc, ~/.bashrc)
-export PATH="$HOME/Work/xtrace-skill/scripts:$PATH"
+```
+Skills:
+  ✓ Pi:         ~/.pi/agent/skills/instruments/
+  ✓ Cursor:     ~/.cursor/skills/instruments/
+  ✓ Claude Code: ~/.claude/skills/instruments/
 ```
 
-### Install optional tools (recommended)
+All three agents read the same `SKILL.md` natively — one repo, one file, three symlinks.
+
+### Optional tools (recommended)
 
 ```bash
 cargo install inferno        # Best flamegraph SVGs (click-to-zoom, search, hover)
@@ -403,7 +407,7 @@ trace-analyze.py calltree "$TRACE" --min-pct 5
 # 5. Make the fix, rebuild, re-profile
 vim src/hash.cpp  # optimize
 cmake --build .
-TRACE_AFTER=$(trace -d 10 ./build/my_app --benchmark)
+TRACE_AFTER=$(xtrace -d 10 ./build/my_app --benchmark)
 
 # 6. Compare
 trace-analyze.py summary "$TRACE" --json > /tmp/before.json
@@ -491,18 +495,20 @@ The XML parser handles xctrace's id/ref/sentinel encoding:
 - `<sentinel/>` means "reuse previous row's value for this column"
 - Frames in backtraces are leaf-first (index 0 = executing function)
 
-## Pi Skill
+## AI Agent Skill
 
-This project is also a [pi](https://github.com/mariozechner/pi-coding-agent) skill. The `SKILL.md` file is loaded automatically when the agent encounters profiling tasks.
+This project follows the [Agent Skills](https://agentskills.io) open standard. The `SKILL.md` file is read natively by:
 
-To install as a pi skill:
+- **[Pi](https://github.com/mariozechner/pi-coding-agent)** — `~/.pi/agent/skills/instruments/`
+- **[Cursor](https://cursor.com)** — `~/.cursor/skills/instruments/`
+- **[Claude Code](https://code.claude.com)** — `~/.claude/skills/instruments/`
+
+Run `./install.sh` to symlink into all detected agents, or manually:
 
 ```bash
-# Option 1: Symlink
 ln -s ~/Work/xtrace-skill ~/.pi/agent/skills/instruments
-
-# Option 2: Copy
-cp -R ~/Work/xtrace-skill ~/.pi/agent/skills/instruments
+ln -s ~/Work/xtrace-skill ~/.cursor/skills/instruments
+ln -s ~/Work/xtrace-skill ~/.claude/skills/instruments
 ```
 
 ## License
