@@ -7,7 +7,7 @@ Unix-style profiling tools for macOS Instruments. Record traces, analyze hotspot
 xtrace ./my_app --benchmark
 
 # Pipe to a flamegraph
-xtrace ./my_app | trace-flamegraph - --open
+xtrace ./my_app | trace-speedscope -
 
 # Build → profile → interactive analysis
 cmake --build . && xtrace ./my_app | trace-speedscope -
@@ -77,7 +77,7 @@ xtrace -d 10 ./my_app
 
 # The summary prints to stderr, the trace path prints to stdout.
 # Pipe to any visualization tool:
-xtrace ./my_app | trace-flamegraph - --open      # flamegraph in browser
+xtrace ./my_app | trace-speedscope -      # flamegraph in browser
 xtrace ./my_app | trace-speedscope -             # interactive analysis
 xtrace ./my_app | trace-analyze.py summary -     # text summary
 ```
@@ -106,10 +106,10 @@ xtrace [options] command [args...]
 # Save the trace path for later use
 TRACE=$(xtrace -d 10 ./my_app)
 trace-analyze.py calltree "$TRACE" --depth 15
-trace-flamegraph.sh "$TRACE" -w 2400 --open
+trace-speedscope.sh "$TRACE"
 
 # Build → profile in one line
-make -j8 && xtrace ./build/app | trace-flamegraph - --open
+make -j8 && xtrace ./build/app | trace-speedscope -
 ```
 
 ---
@@ -303,7 +303,6 @@ trace-flamegraph.sh <trace|-> [options]
 | `--process NAME` | Process filter |
 | `--thread NAME` | Thread filter |
 | `--tool TOOL` | Force: `inferno`, `flamegraph.pl`, `builtin` |
-| `--open` | Open in browser |
 
 When inferno is installed and no filters are needed, uses the optimal native pipeline:
 `xctrace export → inferno-collapse-xctrace → inferno-flamegraph`
@@ -415,7 +414,7 @@ trace-analyze.py summary "$TRACE_AFTER" --json > /tmp/after.json
 trace-analyze.py diff /tmp/before.json /tmp/after.json
 
 # 7. Visual diff
-trace-diff-flamegraph.sh "$TRACE" "$TRACE_AFTER" --open
+trace-diff-flamegraph.sh "$TRACE" "$TRACE_AFTER" -o diff.svg
 ```
 
 ### Drill Into a Spike
@@ -428,14 +427,14 @@ trace-analyze.py timeline "$TRACE" --window 100ms
 
 # Zoom into the spike
 trace-analyze.py summary "$TRACE" --time-range 3.2s-3.5s
-trace-flamegraph.sh "$TRACE" --time-range 3.2s-3.5s --open
+trace-speedscope.sh "$TRACE" --time-range 3.2s-3.5s
 ```
 
 ### Profile a Running Process
 
 ```bash
 # By PID
-trace-record.sh -d 10 -p $(pgrep -x MyApp) | trace-flamegraph.sh - --open
+trace-record.sh -d 10 -p $(pgrep -x MyApp) | trace-speedscope.sh -
 
 # By name
 trace-record.sh -d 10 -n Safari | trace-speedscope.sh -

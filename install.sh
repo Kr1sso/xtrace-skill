@@ -98,20 +98,34 @@ else
     echo -e "  ${CYAN}·${NC} Claude Code: not detected"
 fi
 
-# ── Optional tools ───────────────────────────────────────────────────────────
+# ── Required tools ────────────────────────────────────────────────────────────
 echo ""
-echo -e "${BOLD}Optional:${NC}"
+echo -e "${BOLD}Tools:${NC}"
 
 if command -v inferno-flamegraph &>/dev/null; then
     echo -e "  ${GREEN}✓${NC} inferno"
 else
-    echo -e "  ${YELLOW}!${NC} inferno: cargo install inferno"
+    echo -e "  Installing inferno (flamegraph generator)..." >&2
+    if command -v cargo &>/dev/null; then
+        cargo install inferno 2>&1 | tail -1
+        echo -e "  ${GREEN}✓${NC} inferno installed"
+    else
+        echo -e "  ${YELLOW}!${NC} cargo not found — install Rust first: https://rustup.rs"
+        echo "      Then: cargo install inferno"
+    fi
 fi
 
 if command -v speedscope &>/dev/null; then
     echo -e "  ${GREEN}✓${NC} speedscope"
 else
-    echo -e "  ${YELLOW}!${NC} speedscope: npm install -g speedscope"
+    echo -e "  Installing speedscope (interactive profiler UI)..." >&2
+    if command -v npm &>/dev/null; then
+        npm install -g speedscope 2>&1 | tail -1
+        echo -e "  ${GREEN}✓${NC} speedscope installed"
+    else
+        echo -e "  ${YELLOW}!${NC} npm not found — install Node.js first"
+        echo "      Then: npm install -g speedscope"
+    fi
 fi
 
 echo ""

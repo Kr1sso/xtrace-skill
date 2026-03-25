@@ -11,8 +11,7 @@ Unix-style CPU profiling for macOS. Composable tools that pipe together.
 
 ```bash
 xtrace ./my_app                                    # record + print summary
-xtrace ./my_app | trace-flamegraph - --open        # → flamegraph in browser
-xtrace ./my_app | trace-speedscope -               # → interactive analysis
+xtrace ./my_app | trace-speedscope -               # → interactive analysis (best)
 cmake --build . && xtrace ./build/app              # build then profile
 ```
 
@@ -25,21 +24,19 @@ cmake --build . && xtrace ./build/app              # build then profile
 | **`xtrace`** | Record + summarize. Prefix any command. Path to stdout. |
 | `trace-record.sh` | Record with full control (attach, wait-for, system-wide, templates) |
 | `trace-analyze.py` | Analysis engine: summary, timeline, calltree, collapsed, diff |
-| `trace-flamegraph.sh` | Flamegraph SVG (auto-picks inferno > flamegraph.pl > builtin) |
-| `trace-speedscope.sh` | Interactive web UI (best for human deep-dive) |
-| `trace-diff-flamegraph.sh` | Differential red/blue flamegraph between two traces |
+| `trace-speedscope.sh` | **Interactive visualization** (speedscope web UI) |
+| `trace-flamegraph.sh` | Generate SVG flamegraph file (for sharing/archiving) |
+| `trace-diff-flamegraph.sh` | Differential red/blue SVG between two traces |
 | `trace-check.sh` | Verify environment |
 | `sample-quick.sh` | Lightweight profiling via macOS `sample` (no Xcode needed) |
 
 ## Prerequisites
 
 ```bash
-./scripts/trace-check.sh      # verify
-cargo install inferno          # recommended: best flamegraphs
-npm install -g speedscope      # recommended: interactive UI
+./install.sh    # installs to PATH, installs speedscope + inferno, registers skills
 ```
 
-**Required:** Xcode or Command Line Tools, Python 3.8+
+**Required:** Xcode or Command Line Tools, Python 3.8+, speedscope, inferno
 
 **Debug symbols per toolchain:**
 
@@ -59,17 +56,19 @@ npm install -g speedscope      # recommended: interactive UI
 BASELINE=$(xtrace -d 10 ./build/my_app --benchmark)
 # → reads summary from stderr, e.g. "computeHash() is 24% self time"
 
-# 2. Save baseline for comparison
+# 2. Visualize interactively
+trace-speedscope.sh "$BASELINE"
+
+# 3. Save baseline for comparison
 ./scripts/trace-analyze.py summary "$BASELINE" --json > /tmp/before.json
 
-# 3. Fix the hotspot, rebuild, re-profile
+# 4. Fix the hotspot, rebuild, re-profile
 cmake --build .
 AFTER=$(xtrace -d 10 ./build/my_app --benchmark)
 ./scripts/trace-analyze.py summary "$AFTER" --json > /tmp/after.json
 
-# 4. Compare
+# 5. Compare
 ./scripts/trace-analyze.py diff /tmp/before.json /tmp/after.json
-./scripts/trace-diff-flamegraph.sh "$BASELINE" "$AFTER" --open
 ```
 
 ### LLM Pattern
@@ -136,14 +135,21 @@ Confidence: `██` high (>50 samples), `▓░` medium (20-50), `░░` low (
 ./scripts/trace-analyze.py diff <before.json> <after.json> [--threshold PCT]
 ```
 
-## Flamegraphs
+## Visualization
 
+**Interactive (use this):**
 ```bash
-xtrace ./app | trace-flamegraph - --open                              # one-shot
-./scripts/trace-flamegraph.sh recording.trace -w 2400 --open          # wide, from file
-./scripts/trace-flamegraph.sh recording.trace --time-range 3.2s-3.5s --open  # window
-./scripts/trace-diff-flamegraph.sh before.trace after.trace --open    # differential
-xtrace ./app | trace-speedscope -                                     # interactive
+xtrace ./app | trace-speedscope -                        # pipe directly
+trace-speedscope.sh /tmp/my.trace                        # from file
+trace-speedscope.sh /tmp/my.trace --time-range 3.2s-3.5s # time window
+```
+
+Speedscope opens in browser with time-ordered view, left-heavy view, sandwich view, zoom, search.
+
+**SVG files (for sharing/CI/archiving only):**
+```bash
+trace-flamegraph.sh recording.trace -o profile.svg
+trace-diff-flamegraph.sh before.trace after.trace -o diff.svg
 ```
 
 ## Interpreting Results
@@ -165,6 +171,3 @@ xtrace ./app | trace-speedscope -                                     # interact
 | No samples | Ensure workload is CPU-active during recording |
 | Unsymbolicated frames | Rebuild with `-g`, ensure `.dSYM` present |
 | Processor Trace errors | System Settings → Privacy & Security → Developer Tools |
-| `inferno not found` | `cargo install inferno` |
-| `speedscope not found` | `npm install -g speedscope` |
-| SVG opens in wrong app | Scripts use `open -a Safari` |

@@ -3,14 +3,22 @@
 # Uses inferno (preferred), flamegraph.pl (fallback), or built-in generator (last resort)
 set -eo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve through symlinks to find the real scripts directory
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
     cat >&2 <<'EOF'
 Usage: trace-flamegraph.sh [options] <trace-file>
 
-Generate an interactive SVG flamegraph from an Instruments .trace file.
+Generate an SVG flamegraph from an Instruments .trace file.
+For interactive viewing, use trace-speedscope.sh instead.
 
 Uses the best available tool:
   1. inferno-flamegraph  (cargo install inferno)     — best quality
@@ -26,14 +34,12 @@ Options:
   --thread NAME         Filter to a specific thread
   --color-by SCHEME     Color: 'module' or 'heat' (default: heat, inferno ignores this)
   --tool TOOL           Force a specific tool: inferno, flamegraph.pl, builtin
-  --open                Open the SVG after generation
   -h, --help            Show this help
 
 Examples:
-  trace-flamegraph.sh recording.trace
-  trace-flamegraph.sh -o profile.svg -w 2400 recording.trace
-  trace-flamegraph.sh --time-range 2s-5s -o spike.svg recording.trace
-  trace-flamegraph.sh --tool inferno --open recording.trace
+  trace-flamegraph.sh recording.trace -o profile.svg
+  trace-flamegraph.sh -o spike.svg --time-range 2s-5s recording.trace
+  xtrace ./app | trace-speedscope -     # ← for interactive viewing
 EOF
     exit "${1:-1}"
 }
@@ -47,7 +53,6 @@ PROCESS=""
 THREAD=""
 COLOR_BY="heat"
 FORCE_TOOL=""
-OPEN_AFTER=false
 TRACE_FILE=""
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
@@ -61,7 +66,6 @@ while [[ $# -gt 0 ]]; do
         --thread)      THREAD="$2"; shift 2 ;;
         --color-by)    COLOR_BY="$2"; shift 2 ;;
         --tool)        FORCE_TOOL="$2"; shift 2 ;;
-        --open)        OPEN_AFTER=true; shift ;;
         -h|--help)     usage 0 ;;
         -)             TRACE_FILE="-"; shift ;;
         -*)            echo "Error: Unknown option: $1" >&2; usage 1 ;;
@@ -170,11 +174,6 @@ if [ -f "$OUTPUT" ]; then
     SIZE=$(du -sh "$OUTPUT" 2>/dev/null | cut -f1)
     echo "" >&2
     echo "Flamegraph: $OUTPUT ($SIZE)" >&2
-    echo "Open with: open $OUTPUT" >&2
-
-    if [ "$OPEN_AFTER" = true ]; then
-        open -a "Safari" "$OUTPUT" 2>/dev/null || open -a "Google Chrome" "$OUTPUT" 2>/dev/null || open "$OUTPUT"
-    fi
 else
     echo "Error: Failed to generate flamegraph" >&2
     exit 1

@@ -2,7 +2,14 @@
 # trace-diff-flamegraph.sh — Generate a differential (red/blue) flamegraph between two traces
 set -eo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Resolve through symlinks to find the real scripts directory
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 
 usage() {
     cat >&2 <<'EOF'
@@ -17,7 +24,6 @@ Options:
   --time-range RANGE    Analyze only a time window in both traces
   --process NAME        Filter to a specific process
   --thread NAME         Filter to a specific thread
-  --open                Open the SVG after generation
   -h, --help            Show this help
 
 Requires: inferno (cargo install inferno)
@@ -35,7 +41,6 @@ WIDTH=1200
 TIME_RANGE=""
 PROCESS=""
 THREAD=""
-OPEN_AFTER=false
 BEFORE=""
 AFTER=""
 
@@ -47,7 +52,6 @@ while [[ $# -gt 0 ]]; do
         --time-range)  TIME_RANGE="$2"; shift 2 ;;
         --process)     PROCESS="$2"; shift 2 ;;
         --thread)      THREAD="$2"; shift 2 ;;
-        --open)        OPEN_AFTER=true; shift ;;
         -h|--help)     usage 0 ;;
         -*)            echo "Error: Unknown option: $1" >&2; usage 1 ;;
         *)
@@ -110,10 +114,6 @@ if [ -f "$OUTPUT" ]; then
     echo "" >&2
     echo "Diff flamegraph: $OUTPUT ($SIZE)" >&2
     echo "  Red = hotter (regression), Blue = cooler (improvement)" >&2
-
-    if [ "$OPEN_AFTER" = true ]; then
-        open -a "Safari" "$OUTPUT" 2>/dev/null || open -a "Google Chrome" "$OUTPUT" 2>/dev/null || open "$OUTPUT"
-    fi
 else
     echo "Error: Failed to generate diff flamegraph." >&2
     exit 1
