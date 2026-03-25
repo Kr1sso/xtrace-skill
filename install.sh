@@ -81,12 +81,21 @@ else
 fi
 
 # ── Cursor skill (Agent Skills standard) ─────────────────────────────────────
-# Cursor reads skills from ~/.cursor/skills/<name>/ with SKILL.md
-# Also reads ~/.claude/skills/ and ~/.codex/skills/ for compatibility
+# Cursor reads: ~/.cursor/skills/<name>/ with SKILL.md
 if [ -d "$HOME/.cursor" ]; then
     install_skill "$HOME/.cursor/skills" "instruments" "Cursor"
 else
     echo -e "  ${CYAN}·${NC} Cursor: not detected"
+fi
+
+# ── Claude Code skill ────────────────────────────────────────────────────────
+# Claude Code reads: ~/.claude/skills/<name>/ with SKILL.md
+# Also reads ~/.cursor/skills/ and ~/.codex/skills/ for compatibility
+if [ -d "$HOME/.claude" ] || command -v claude &>/dev/null; then
+    mkdir -p "$HOME/.claude/skills"
+    install_skill "$HOME/.claude/skills" "instruments" "Claude Code"
+else
+    echo -e "  ${CYAN}·${NC} Claude Code: not detected"
 fi
 
 # ── Optional tools ───────────────────────────────────────────────────────────
