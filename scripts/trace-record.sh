@@ -128,7 +128,7 @@ if [ -n "$WAIT_FOR" ]; then
             PID="$FOUND_PID"
             break
         fi
-        sleep 0.5
+        sleep 1
         ELAPSED=$((ELAPSED + 1))
     done
     if [ -z "$FOUND_PID" ]; then

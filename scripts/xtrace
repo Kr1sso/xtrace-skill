@@ -18,7 +18,7 @@ while [ -L "$SOURCE" ]; do
     SOURCE="$(readlink "$SOURCE")"
     [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
 done
-SCRIPT_DIR="$(cd "$(dirname "$SOURCE")/scripts" 2>/dev/null && pwd || cd "$(dirname "$SOURCE")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 
 usage() {
     cat >&2 <<'EOF'
