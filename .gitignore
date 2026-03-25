@@ -89,3 +89,4 @@ venv/
 *.svg
 *.trace
 profile*.json
+xtrace-skill
