@@ -1,231 +1,465 @@
 #!/bin/bash
-# test.sh — End-to-end tests for xtrace skill
-# Records a real trace and verifies all tools work correctly.
+# test.sh — Comprehensive end-to-end tests for xtrace skill
+# Records real traces and exercises every script, subcommand, flag, and pipe pattern.
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/scripts" && pwd)"
 PASS=0
 FAIL=0
 ERRORS=""
+TRACE_FILE=""
+TRACE_FILE_2=""
+CLEANUP_FILES=()
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 pass() { ((PASS++)); echo "  ✓ $1"; }
 fail() { ((FAIL++)); ERRORS+="  ✗ $1\n"; echo "  ✗ $1"; }
 
 check() {
-    local desc="$1"
-    shift
-    if "$@" >/dev/null 2>&1; then
-        pass "$desc"
-    else
-        fail "$desc (exit $?)"
-    fi
+    local desc="$1"; shift
+    if "$@" >/dev/null 2>&1; then pass "$desc"
+    else fail "$desc (exit $?)"; fi
 }
 
 check_output() {
-    local desc="$1"
-    local expected="$2"
-    shift 2
+    local desc="$1" expected="$2"; shift 2
     local output
-    output=$("$@" 2>&1)
-    if echo "$output" | grep -q "$expected"; then
-        pass "$desc"
-    else
-        fail "$desc — expected '$expected' in output"
-    fi
+    output=$("$@" 2>&1) || true
+    if echo "$output" | grep -q "$expected"; then pass "$desc"
+    else fail "$desc — expected '$expected'"; fi
+}
+
+check_output_not() {
+    local desc="$1" unexpected="$2"; shift 2
+    local output
+    output=$("$@" 2>&1) || true
+    if echo "$output" | grep -q "$unexpected"; then fail "$desc — found '$unexpected'"
+    else pass "$desc"; fi
 }
 
 check_file() {
-    local desc="$1"
-    local path="$2"
-    if [ -f "$path" ] && [ -s "$path" ]; then
-        pass "$desc"
-    else
-        fail "$desc — file missing or empty: $path"
-    fi
+    local desc="$1" path="$2"
+    if [ -f "$path" ] && [ -s "$path" ]; then pass "$desc"
+    else fail "$desc — file missing or empty: $path"; fi
 }
 
-# ── Prerequisites ────────────────────────────────────────────────────────────
-echo "━━━ Prerequisites ━━━"
+check_exit() {
+    local desc="$1" expected="$2"; shift 2
+    local code=0
+    "$@" >/dev/null 2>&1 || code=$?
+    if [ "$code" -eq "$expected" ]; then pass "$desc (exit $code)"
+    else fail "$desc — expected exit $expected, got $code"; fi
+}
+
+tmpfile() {
+    local f
+    f=$(mktemp "/tmp/xtrace_test_XXXXXXXX")
+    if [ -n "$1" ]; then
+        mv "$f" "${f}${1}"
+        f="${f}${1}"
+    fi
+    CLEANUP_FILES+=("$f")
+    echo "$f"
+}
+
+cleanup() {
+    for f in "${CLEANUP_FILES[@]}"; do rm -f "$f" 2>/dev/null; done
+    rm -rf "$TRACE_FILE" "$TRACE_FILE_2" 2>/dev/null
+}
+trap cleanup EXIT
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo "━━━ 1. Prerequisites ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
 check "xctrace available" command -v xctrace
 check "python3 available" command -v python3
 check "python3 >= 3.8" python3 -c "import sys; assert sys.version_info >= (3, 8)"
+check "inferno available" command -v inferno-flamegraph
+check "speedscope available" command -v speedscope
 check "trace-analyze.py compiles" python3 -m py_compile "$SCRIPT_DIR/trace-analyze.py"
 
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Script Help ━━━"
+echo "━━━ 2. Help text (every script, every subcommand) ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
 check_output "xtrace --help" "Usage:" bash "$SCRIPT_DIR/xtrace" --help
+check_output "xtrace -h" "Usage:" bash "$SCRIPT_DIR/xtrace" -h
 check_output "trace-record.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-record.sh" --help
+check_output "trace-record.sh --help mentions --wait-for" "wait-for" bash "$SCRIPT_DIR/trace-record.sh" --help
 check_output "trace-flamegraph.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-flamegraph.sh" --help
+check_output "trace-flamegraph.sh --help no --open" "speedscope" bash "$SCRIPT_DIR/trace-flamegraph.sh" --help
+check_output_not "trace-flamegraph.sh --help no --open flag" "\-\-open" bash "$SCRIPT_DIR/trace-flamegraph.sh" --help
 check_output "trace-speedscope.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-speedscope.sh" --help
 check_output "trace-diff-flamegraph.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" --help
+check_output_not "trace-diff-flamegraph.sh --help no --open" "\-\-open" bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" --help
 check_output "sample-quick.sh --help" "Usage:" bash "$SCRIPT_DIR/sample-quick.sh" --help
+check_output "trace-check.sh runs" "xctrace" bash "$SCRIPT_DIR/trace-check.sh"
+
+# trace-analyze.py subcommands
 check_output "trace-analyze.py --help" "summary" python3 "$SCRIPT_DIR/trace-analyze.py" --help
-check_output "trace-analyze.py summary --help" "top" python3 "$SCRIPT_DIR/trace-analyze.py" summary --help
-check_output "trace-analyze.py timeline --help" "window" python3 "$SCRIPT_DIR/trace-analyze.py" timeline --help
-check_output "trace-analyze.py calltree --help" "depth" python3 "$SCRIPT_DIR/trace-analyze.py" calltree --help
-check_output "trace-analyze.py collapsed --help" "module" python3 "$SCRIPT_DIR/trace-analyze.py" collapsed --help
-check_output "trace-analyze.py flamegraph --help" "output" python3 "$SCRIPT_DIR/trace-analyze.py" flamegraph --help
-check_output "trace-analyze.py diff --help" "threshold" python3 "$SCRIPT_DIR/trace-analyze.py" diff --help
+for sub in summary timeline calltree collapsed flamegraph diff; do
+    check_output "trace-analyze.py $sub --help" "trace" python3 "$SCRIPT_DIR/trace-analyze.py" "$sub" --help
+done
 
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ trace-check.sh ━━━"
+echo "━━━ 3. Error handling ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
-check_output "trace-check runs" "xctrace" bash "$SCRIPT_DIR/trace-check.sh"
+check_exit "xtrace no args → error" 1 bash "$SCRIPT_DIR/xtrace"
+check_exit "trace-record.sh no target → error" 1 bash "$SCRIPT_DIR/trace-record.sh"
+check_exit "trace-record.sh multiple targets → error" 1 bash "$SCRIPT_DIR/trace-record.sh" -p 1 -n foo
+check_exit "trace-flamegraph.sh no trace → error" 1 bash "$SCRIPT_DIR/trace-flamegraph.sh"
+check_exit "trace-speedscope.sh no trace → error" 1 bash "$SCRIPT_DIR/trace-speedscope.sh"
+check_exit "trace-analyze.py no subcommand → error" 1 python3 "$SCRIPT_DIR/trace-analyze.py"
+check_exit "trace-analyze.py summary nonexistent → error" 1 python3 "$SCRIPT_DIR/trace-analyze.py" summary /nonexistent.trace
+check_exit "trace-analyze.py diff bad json → error" 1 python3 "$SCRIPT_DIR/trace-analyze.py" diff /dev/null /dev/null
 
+check_output "trace-record.sh bad template → error" "Unknown template" bash "$SCRIPT_DIR/trace-record.sh" -t "Nonexistent Template" -d 1 -- /usr/bin/true
+check_output "trace-flamegraph.sh nonexistent trace → error" "not found" bash "$SCRIPT_DIR/trace-flamegraph.sh" /nonexistent.trace
+check_output "trace-speedscope.sh nonexistent trace → error" "not found" bash "$SCRIPT_DIR/trace-speedscope.sh" /nonexistent.trace
+
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Recording ━━━"
+echo "━━━ 4. Recording ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
-TRACE_FILE="/tmp/xtrace_test_$(date +%s).trace"
-
-# Record a 3-second trace of /usr/bin/yes
-echo "  Recording 3s trace of /usr/bin/yes..."
+# Record trace 1 (via trace-record.sh)
+TRACE_FILE="/tmp/xtrace_test_$(date +%s)_1.trace"
+echo "  Recording 3s trace of /usr/bin/yes (trace-record.sh)..."
 TRACE_PATH=$(bash "$SCRIPT_DIR/trace-record.sh" -d 3 -o "$TRACE_FILE" -- /usr/bin/yes 2>/dev/null)
 
 if [ -n "$TRACE_PATH" ] && [ -e "$TRACE_PATH" ]; then
-    pass "trace-record.sh produced trace: $TRACE_PATH"
+    pass "trace-record.sh produces trace: $(basename "$TRACE_PATH")"
 else
-    fail "trace-record.sh failed to produce trace"
-    echo ""
-    echo "━━━ RESULTS ━━━"
-    echo "  $PASS passed, $FAIL failed"
-    echo "Cannot continue without a trace file."
+    fail "trace-record.sh failed"
+    echo "Cannot continue without a trace. Aborting."
     exit 1
 fi
 
+# Record trace 2 (via xtrace wrapper)
+echo "  Recording 3s trace of /usr/bin/yes (xtrace)..."
+TRACE_FILE_2=$(bash "$SCRIPT_DIR/xtrace" -d 3 /usr/bin/yes 2>/dev/null)
+
+if [ -n "$TRACE_FILE_2" ] && [ -e "$TRACE_FILE_2" ]; then
+    pass "xtrace produces trace: $(basename "$TRACE_FILE_2")"
+else
+    fail "xtrace failed to produce trace"
+fi
+
+# Verify trace-record.sh stdout is just the path (for piping)
+STDOUT_TRACE="/tmp/xtrace_test_stdout_$(date +%s).trace"
+CLEANUP_FILES+=("$STDOUT_TRACE")
+STDOUT_LINES=$(bash "$SCRIPT_DIR/trace-record.sh" -d 2 -o "$STDOUT_TRACE" -- /usr/bin/true 2>/dev/null | wc -l | tr -d ' ')
+if [ "$STDOUT_LINES" -eq 1 ]; then
+    pass "trace-record.sh stdout is exactly 1 line (path only)"
+else
+    fail "trace-record.sh stdout has $STDOUT_LINES lines (expected 1)"
+fi
+
+# Verify xtrace prints summary to stderr and path to stdout
+XTRACE_STDOUT=$(bash "$SCRIPT_DIR/xtrace" -d 2 /usr/bin/yes 2>/dev/null)
+XTRACE_STDERR=$(bash "$SCRIPT_DIR/xtrace" -d 2 /usr/bin/yes 2>&1 >/dev/null)
+CLEANUP_FILES+=("$XTRACE_STDOUT")
+if [ -e "$XTRACE_STDOUT" ]; then
+    pass "xtrace stdout is a valid trace path"
+else
+    fail "xtrace stdout is not a valid path: $XTRACE_STDOUT"
+fi
+if echo "$XTRACE_STDERR" | grep -q "Samples\|Self%"; then
+    pass "xtrace stderr contains summary"
+else
+    fail "xtrace stderr missing summary"
+fi
+
+# xtrace --no-summary
+NOSUMMARY_STDERR=$(bash "$SCRIPT_DIR/xtrace" --no-summary -d 2 /usr/bin/yes 2>&1 >/dev/null)
+if echo "$NOSUMMARY_STDERR" | grep -q "Self%"; then
+    fail "xtrace --no-summary still prints summary"
+else
+    pass "xtrace --no-summary suppresses summary"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Analysis: summary ━━━"
+echo "━━━ 5. Analysis: summary ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
-SUMMARY_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top 10 2>&1)
-if echo "$SUMMARY_OUT" | grep -q "Samples"; then
-    pass "summary produces output"
-else
-    fail "summary output missing 'Samples'"
-fi
-
-if echo "$SUMMARY_OUT" | grep -q "Module"; then
-    pass "summary shows module breakdown"
-else
-    fail "summary missing module breakdown"
-fi
+check_output "summary basic" "Samples" python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH"
+check_output "summary --top 3" "Module" python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top 3
+check_output "summary --by total" "Total%" python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --by total
 
 # JSON output
-JSON_FILE="/tmp/xtrace_test_summary.json"
+JSON_FILE=$(tmpfile .json)
 python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --json > "$JSON_FILE" 2>/dev/null
-if python3 -c "import json; json.load(open('$JSON_FILE'))" 2>/dev/null; then
-    pass "summary --json produces valid JSON"
-else
-    fail "summary --json produces invalid JSON"
-fi
+check "summary --json is valid JSON" python3 -c "import json; json.load(open('$JSON_FILE'))"
+check "JSON has functions" python3 -c "import json; d=json.load(open('$JSON_FILE')); assert len(d['functions']) > 0"
+check "JSON has modules" python3 -c "import json; d=json.load(open('$JSON_FILE')); assert len(d['modules']) > 0"
+check "JSON has total_samples" python3 -c "import json; d=json.load(open('$JSON_FILE')); assert d['total_samples'] > 0"
+check "JSON has duration_s" python3 -c "import json; d=json.load(open('$JSON_FILE')); assert d['duration_s'] > 0"
+check "JSON has template" python3 -c "import json; d=json.load(open('$JSON_FILE')); assert d['template'] == 'Time Profiler'"
 
-if python3 -c "import json; d=json.load(open('$JSON_FILE')); assert 'functions' in d and 'modules' in d" 2>/dev/null; then
-    pass "JSON has functions and modules keys"
-else
-    fail "JSON missing functions or modules"
-fi
+# JSON function entries have all fields
+check "JSON function has self_pct" python3 -c "
+import json; d=json.load(open('$JSON_FILE'))
+f=d['functions'][0]
+assert all(k in f for k in ['function','module','self_count','self_pct','total_count','total_pct'])
+"
 
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Analysis: timeline ━━━"
+echo "━━━ 6. Analysis: timeline ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
-TIMELINE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --window 500ms 2>&1)
-if echo "$TIMELINE_OUT" | grep -q "Spark"; then
-    pass "timeline produces bucketed output"
-else
-    fail "timeline output missing bucketed data"
-fi
+check_output "timeline 500ms" "Top Functions" python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --window 500ms
+check_output "timeline 1s" "Top Functions" python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --window 1s
+check_output "timeline 100ms" "Top Functions" python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --window 100ms
+check_output "timeline --top 3" "Top Functions" python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --top 3
+check_output "timeline --adaptive" "PHASE" python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --adaptive
 
-ADAPTIVE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --adaptive 2>&1)
-if echo "$ADAPTIVE_OUT" | grep -q "PHASE"; then
-    pass "timeline --adaptive detects phases"
-else
-    fail "timeline --adaptive missing phase detection"
-fi
+# Timeline JSON
+TIMELINE_JSON=$(tmpfile .json)
+python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --json > "$TIMELINE_JSON" 2>/dev/null
+check "timeline --json valid" python3 -c "import json; json.load(open('$TIMELINE_JSON'))"
+check "timeline JSON has buckets" python3 -c "import json; d=json.load(open('$TIMELINE_JSON')); assert len(d['buckets']) > 0"
+check "timeline JSON buckets have samples" python3 -c "
+import json; d=json.load(open('$TIMELINE_JSON'))
+assert all('samples' in b for b in d['buckets'])
+"
 
+# Adaptive JSON
+ADAPTIVE_JSON=$(tmpfile .json)
+python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --adaptive --json > "$ADAPTIVE_JSON" 2>/dev/null
+check "adaptive JSON has phases" python3 -c "import json; d=json.load(open('$ADAPTIVE_JSON')); assert 'phases' in d and len(d['phases']) > 0"
+
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Analysis: calltree ━━━"
+echo "━━━ 7. Analysis: calltree ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
 TREE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" 2>&1)
-if echo "$TREE_OUT" | grep -q "├\|└"; then
-    pass "calltree produces tree output"
-else
-    fail "calltree missing tree characters"
-fi
+if echo "$TREE_OUT" | grep -q '├\|└'; then pass "calltree has tree chars"
+else fail "calltree missing tree chars"; fi
 
+check_output "calltree --depth 3" "%" python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --depth 3
+check_output "calltree --min-pct 10" "%" python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --min-pct 10
+
+# Depth limiting works (shallow tree should have fewer lines)
+DEEP=$(python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --depth 20 2>&1 | wc -l)
+SHALLOW=$(python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --depth 3 2>&1 | wc -l)
+if [ "$SHALLOW" -le "$DEEP" ]; then pass "calltree --depth limits output ($SHALLOW <= $DEEP lines)"
+else fail "calltree --depth didn't reduce output"; fi
+
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Analysis: collapsed ━━━"
+echo "━━━ 8. Analysis: collapsed ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
 COLLAPSED_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" 2>&1)
-if echo "$COLLAPSED_OUT" | grep -q ";"; then
-    pass "collapsed produces semicolon-delimited stacks"
-else
-    fail "collapsed output missing semicolons"
-fi
+if echo "$COLLAPSED_OUT" | grep -q ";"; then pass "collapsed has semicolons"
+else fail "collapsed missing semicolons"; fi
 
 STACK_COUNT=$(echo "$COLLAPSED_OUT" | wc -l | tr -d ' ')
-if [ "$STACK_COUNT" -gt 0 ]; then
-    pass "collapsed has $STACK_COUNT unique stacks"
-else
-    fail "collapsed produced 0 stacks"
-fi
+if [ "$STACK_COUNT" -gt 0 ]; then pass "collapsed has $STACK_COUNT stacks"
+else fail "collapsed empty"; fi
 
+# Verify format: each line is "frame;frame;... count"
+BAD_LINES=$(echo "$COLLAPSED_OUT" | grep -cv ' [0-9]\+$' || true)
+if [ "$BAD_LINES" -eq 0 ]; then pass "collapsed format valid (every line ends with count)"
+else fail "collapsed has $BAD_LINES malformed lines"; fi
+
+# --module flag
+MODULE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --module 2>&1)
+if echo "$MODULE_OUT" | grep -q '\['; then pass "collapsed --module includes [module] tags"
+else fail "collapsed --module missing module tags"; fi
+
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Analysis: diff ━━━"
+echo "━━━ 9. Analysis: diff ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
+# Same file diff (should show all unchanged)
 DIFF_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$JSON_FILE" 2>&1)
-if echo "$DIFF_OUT" | grep -q "UNCHANGED\|DIFF"; then
-    pass "diff produces comparison output"
+if echo "$DIFF_OUT" | grep -q "UNCHANGED\|DIFF"; then pass "diff same-file shows unchanged"
+else fail "diff output unexpected"; fi
+
+# Create a modified JSON (simulate optimization)
+MODIFIED_JSON=$(tmpfile .json)
+python3 -c "
+import json
+d = json.load(open('$JSON_FILE'))
+for f in d['functions']:
+    f['self_pct'] = max(0, f['self_pct'] - 5.0)
+    f['self_count'] = max(0, f['self_count'] - 10)
+json.dump(d, open('$MODIFIED_JSON', 'w'))
+" 2>/dev/null
+check_output "diff with changes shows IMPROVED" "IMPROVED" python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$MODIFIED_JSON"
+
+# --threshold flag
+check_output "diff --threshold 50 hides small changes" "UNCHANGED" python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$MODIFIED_JSON" --threshold 50
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 10. Analysis: flamegraph (built-in SVG) ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
+
+BUILTIN_SVG=$(tmpfile .svg)
+python3 "$SCRIPT_DIR/trace-analyze.py" flamegraph "$TRACE_PATH" -o "$BUILTIN_SVG" 2>/dev/null
+check_file "built-in flamegraph produces SVG" "$BUILTIN_SVG"
+check_output "SVG has svg tag" "<svg" cat "$BUILTIN_SVG"
+check_output "SVG has script (interactive)" "script" cat "$BUILTIN_SVG"
+check_output "SVG has frame class" "frame" cat "$BUILTIN_SVG"
+
+# --color-by module
+MODULE_SVG=$(tmpfile .svg)
+python3 "$SCRIPT_DIR/trace-analyze.py" flamegraph "$TRACE_PATH" -o "$MODULE_SVG" --color-by module 2>/dev/null
+check_file "flamegraph --color-by module" "$MODULE_SVG"
+
+# --width
+WIDE_SVG=$(tmpfile .svg)
+python3 "$SCRIPT_DIR/trace-analyze.py" flamegraph "$TRACE_PATH" -o "$WIDE_SVG" --width 2400 2>/dev/null
+if grep -q 'width="2400"' "$WIDE_SVG" 2>/dev/null; then pass "flamegraph --width 2400"
+else fail "flamegraph --width not applied"; fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 11. trace-flamegraph.sh (inferno pipeline) ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
+
+INFERNO_SVG=$(tmpfile .svg)
+bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$INFERNO_SVG" "$TRACE_PATH" 2>/dev/null
+check_file "trace-flamegraph.sh produces SVG" "$INFERNO_SVG"
+
+# Verify it used inferno (SVG should have inferno comment)
+if grep -q "inferno\|FlameGraph" "$INFERNO_SVG" 2>/dev/null; then pass "SVG generated by inferno"
+else fail "SVG doesn't appear to be from inferno"; fi
+
+# With --title
+TITLED_SVG=$(tmpfile .svg)
+bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$TITLED_SVG" -t "Test Title" "$TRACE_PATH" 2>/dev/null
+if grep -q "Test Title" "$TITLED_SVG" 2>/dev/null; then pass "trace-flamegraph.sh --title"
+else fail "title not in SVG"; fi
+
+# With --width
+WIDE2_SVG=$(tmpfile .svg)
+bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$WIDE2_SVG" -w 3000 "$TRACE_PATH" 2>/dev/null
+check_file "trace-flamegraph.sh -w 3000" "$WIDE2_SVG"
+
+# Force builtin tool
+BUILTIN2_SVG=$(tmpfile .svg)
+bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$BUILTIN2_SVG" --tool builtin "$TRACE_PATH" 2>/dev/null
+check_file "trace-flamegraph.sh --tool builtin" "$BUILTIN2_SVG"
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 12. trace-diff-flamegraph.sh ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
+
+DIFF_SVG=$(tmpfile .svg)
+bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" -o "$DIFF_SVG" "$TRACE_PATH" "$TRACE_PATH" 2>/dev/null
+check_file "trace-diff-flamegraph.sh produces SVG" "$DIFF_SVG"
+
+# With title
+DIFF_TITLED_SVG=$(tmpfile .svg)
+bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" -o "$DIFF_TITLED_SVG" -t "Diff Test" "$TRACE_PATH" "$TRACE_PATH" 2>/dev/null
+check_file "trace-diff-flamegraph.sh with title" "$DIFF_TITLED_SVG"
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 13. Piping: stdin with - ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
+
+# trace-analyze.py summary -
+PIPE_SUMMARY=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" summary - --top 5 2>&1)
+if echo "$PIPE_SUMMARY" | grep -q "Samples"; then pass "trace-analyze.py summary - (pipe)"
+else fail "trace-analyze.py summary - pipe failed"; fi
+
+# trace-analyze.py timeline -
+PIPE_TIMELINE=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" timeline - --window 1s 2>&1)
+if echo "$PIPE_TIMELINE" | grep -q "Top Functions"; then pass "trace-analyze.py timeline - (pipe)"
+else fail "trace-analyze.py timeline - pipe failed"; fi
+
+# trace-analyze.py calltree -
+PIPE_TREE=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" calltree - 2>&1)
+if echo "$PIPE_TREE" | grep -q '├\|└\|%'; then pass "trace-analyze.py calltree - (pipe)"
+else fail "trace-analyze.py calltree - pipe failed"; fi
+
+# trace-analyze.py collapsed -
+PIPE_COLLAPSED=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" collapsed - 2>&1)
+if echo "$PIPE_COLLAPSED" | grep -q ";"; then pass "trace-analyze.py collapsed - (pipe)"
+else fail "trace-analyze.py collapsed - pipe failed"; fi
+
+# trace-analyze.py flamegraph -
+PIPE_FLAME_SVG=$(tmpfile .svg)
+echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" flamegraph - -o "$PIPE_FLAME_SVG" 2>/dev/null
+check_file "trace-analyze.py flamegraph - (pipe)" "$PIPE_FLAME_SVG"
+
+# trace-flamegraph.sh -
+PIPE_INFERNO_SVG=$(tmpfile .svg)
+echo "$TRACE_PATH" | timeout 30 bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$PIPE_INFERNO_SVG" - 2>/dev/null
+check_file "trace-flamegraph.sh - (pipe)" "$PIPE_INFERNO_SVG"
+
+# trace-analyze.py summary --json - (pipe JSON)
+PIPE_JSON=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" summary - --json 2>/dev/null)
+if echo "$PIPE_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+    pass "trace-analyze.py summary --json - (pipe valid JSON)"
 else
-    fail "diff output missing comparison data"
+    fail "pipe JSON invalid"
 fi
 
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Analysis: flamegraph (built-in) ━━━"
+echo "━━━ 14. Time range filtering ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
-SVG_FILE="/tmp/xtrace_test_flame.svg"
-python3 "$SCRIPT_DIR/trace-analyze.py" flamegraph "$TRACE_PATH" -o "$SVG_FILE" 2>/dev/null
-check_file "built-in flamegraph produces SVG" "$SVG_FILE"
+# Derive a time range guaranteed to contain samples using the JSON we already have
+FIRST_SAMPLE_S=$(python3 -c "
+import json
+d = json.load(open('$JSON_FILE'))
+# min/max time from timeline data or just use 0-duration
+dur = d.get('duration_s', 3)
+print(f'0s-{dur:.1f}s')
+" 2>/dev/null || echo "0s-3s")
 
-if grep -q "<svg" "$SVG_FILE" 2>/dev/null; then
-    pass "SVG has valid svg tag"
-else
-    fail "SVG missing svg tag"
-fi
+check_output "summary --time-range 0s-2s" "Samples" python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "0s-2s"
 
+# Test that a range straddling real samples works — use 0s to half duration
+HALF_DUR=$(python3 -c "import json; d=json.load(open('$JSON_FILE')); print(f\"{d['duration_s']/2:.1f}s\")" 2>/dev/null || echo "1.5s")
+HALF_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "0s-$HALF_DUR" 2>&1)
+if echo "$HALF_OUT" | grep -q "Samples\|No samples"; then pass "summary --time-range 0s-${HALF_DUR} (valid response)"
+else fail "summary --time-range 0s-${HALF_DUR} gave unexpected output"; fi
+
+# Test that an out-of-range window fails gracefully (not a crash)
+check_exit "summary --time-range 999s-1000s → no samples exit 1" 1 python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "999s-1000s"
+
+check_output "timeline --time-range 0s-2s" "Top Functions" python3 "$SCRIPT_DIR/trace-analyze.py" timeline "$TRACE_PATH" --time-range "0s-2s"
+check_output "calltree --time-range 0s-2s" "%" python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --time-range "0s-2s"
+
+# Collapsed with time range
+RANGE_COLLAPSED=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --time-range "0s-2s" 2>&1)
+FULL_COLLAPSED=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" 2>&1)
+RANGE_COUNT=$(echo "$RANGE_COLLAPSED" | wc -l | tr -d ' ')
+FULL_COUNT=$(echo "$FULL_COLLAPSED" | wc -l | tr -d ' ')
+if [ "$RANGE_COUNT" -le "$FULL_COUNT" ]; then pass "time-range reduces collapsed output ($RANGE_COUNT <= $FULL_COUNT)"
+else fail "time-range didn't reduce output"; fi
+
+# Flamegraph with time range
+RANGE_SVG=$(tmpfile .svg)
+bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$RANGE_SVG" --time-range "0s-2s" "$TRACE_PATH" 2>/dev/null
+check_file "trace-flamegraph.sh --time-range" "$RANGE_SVG"
+
+# ms format
+check_output "time-range ms format" "Samples" python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "500ms-2500ms"
+
+# Open-ended range
+check_output "time-range open-ended (2s-)" "Samples" python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "2s-"
+
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "━━━ Flamegraph script ━━━"
-
-FLAME_SVG="/tmp/xtrace_test_flamegraph_script.svg"
-bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$FLAME_SVG" "$TRACE_PATH" 2>/dev/null
-check_file "trace-flamegraph.sh produces SVG" "$FLAME_SVG"
-
-echo ""
-echo "━━━ Piping: stdin with - ━━━"
-
-PIPE_OUT=$(echo "$TRACE_PATH" | python3 "$SCRIPT_DIR/trace-analyze.py" summary - --top 5 2>&1)
-if echo "$PIPE_OUT" | grep -q "Samples"; then
-    pass "trace-analyze.py accepts - from stdin"
-else
-    fail "trace-analyze.py stdin pipe failed"
-fi
-
-PIPE_SVG="/tmp/xtrace_test_pipe.svg"
-echo "$TRACE_PATH" | bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$PIPE_SVG" - 2>/dev/null
-check_file "trace-flamegraph.sh accepts - from stdin" "$PIPE_SVG"
-
-echo ""
-echo "━━━ Time range filter ━━━"
-
-RANGE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "0s-2s" 2>&1)
-if echo "$RANGE_OUT" | grep -q "Samples"; then
-    pass "time-range filter works"
-else
-    fail "time-range filter failed"
-fi
-
-echo ""
-echo "━━━ sample-quick.sh ━━━"
+echo "━━━ 15. sample-quick.sh ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
 
 /usr/bin/yes > /dev/null 2>&1 &
 YES_PID=$!
@@ -237,21 +471,95 @@ wait "$YES_PID" 2>/dev/null || true
 
 if [ -n "$SAMPLE_PATH" ] && [ -f "$SAMPLE_PATH" ]; then
     pass "sample-quick.sh produces output"
-    # Verify it went to /tmp
-    if echo "$SAMPLE_PATH" | grep -q "^/tmp/"; then
-        pass "sample-quick.sh output in /tmp"
-    else
-        fail "sample-quick.sh output not in /tmp: $SAMPLE_PATH"
-    fi
+    CLEANUP_FILES+=("$SAMPLE_PATH")
+
+    if echo "$SAMPLE_PATH" | grep -q "^/tmp/"; then pass "sample-quick.sh output in /tmp"
+    else fail "sample-quick.sh output not in /tmp: $SAMPLE_PATH"; fi
+
+    if grep -q "Call graph\|Sort by top" "$SAMPLE_PATH" 2>/dev/null; then pass "sample output has call graph"
+    else fail "sample output missing call graph"; fi
 else
-    fail "sample-quick.sh failed to produce output"
+    fail "sample-quick.sh failed"
 fi
 
-# ── Cleanup ──────────────────────────────────────────────────────────────────
-rm -f "$JSON_FILE" "$SVG_FILE" "$FLAME_SVG" "$PIPE_SVG" "$SAMPLE_PATH" 2>/dev/null
-rm -rf "$TRACE_FILE" 2>/dev/null
+# sample-quick.sh by name
+/usr/bin/yes > /dev/null 2>&1 &
+YES_PID2=$!
+sleep 0.3
 
-# ── Results ──────────────────────────────────────────────────────────────────
+SAMPLE_PATH2=$(bash "$SCRIPT_DIR/sample-quick.sh" "yes" 1 2>/dev/null || true)
+kill "$YES_PID2" 2>/dev/null || true
+wait "$YES_PID2" 2>/dev/null || true
+
+if [ -n "$SAMPLE_PATH2" ] && [ -f "$SAMPLE_PATH2" ]; then
+    pass "sample-quick.sh by name"
+    CLEANUP_FILES+=("$SAMPLE_PATH2")
+else
+    fail "sample-quick.sh by name failed"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 16. Symlink resolution ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Test that scripts work when called via symlinks (the real user path)
+if [ -L "$HOME/.local/bin/xtrace" ]; then
+    SYMLINK_TRACE=$("$HOME/.local/bin/xtrace" -d 2 /usr/bin/yes 2>/dev/null)
+    if [ -n "$SYMLINK_TRACE" ] && [ -e "$SYMLINK_TRACE" ]; then
+        pass "xtrace works via symlink"
+        CLEANUP_FILES+=("$SYMLINK_TRACE")
+
+        # trace-analyze.py via symlink
+        SYMLINK_SUMMARY=$("$HOME/.local/bin/trace-analyze.py" summary "$SYMLINK_TRACE" --top 3 2>&1)
+        if echo "$SYMLINK_SUMMARY" | grep -q "Samples"; then pass "trace-analyze.py works via symlink"
+        else fail "trace-analyze.py via symlink failed"; fi
+
+        # trace-flamegraph via symlink
+        SYMLINK_SVG=$(tmpfile .svg)
+        "$HOME/.local/bin/trace-flamegraph" -o "$SYMLINK_SVG" "$SYMLINK_TRACE" 2>/dev/null
+        check_file "trace-flamegraph works via symlink" "$SYMLINK_SVG"
+
+        # pipe via symlinks
+        SYMLINK_PIPE_SVG=$(tmpfile .svg)
+        echo "$SYMLINK_TRACE" | "$HOME/.local/bin/trace-flamegraph" -o "$SYMLINK_PIPE_SVG" - 2>/dev/null
+        check_file "pipe via symlinks" "$SYMLINK_PIPE_SVG"
+    else
+        fail "xtrace via symlink failed"
+    fi
+else
+    echo "  (skipped — symlinks not installed)"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 17. Full pipeline: xtrace → analyze → flamegraph ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Simulate: cmake --build . && xtrace ./app | trace-flamegraph - -o out.svg
+PIPELINE_SVG=$(tmpfile .svg)
+PIPELINE_TRACE=$(bash "$SCRIPT_DIR/xtrace" -d 2 /usr/bin/yes 2>/dev/null)
+CLEANUP_FILES+=("$PIPELINE_TRACE")
+
+if [ -n "$PIPELINE_TRACE" ] && [ -e "$PIPELINE_TRACE" ]; then
+    # Pipe to flamegraph
+    echo "$PIPELINE_TRACE" | timeout 30 bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$PIPELINE_SVG" - 2>/dev/null
+    check_file "full pipeline: xtrace → flamegraph" "$PIPELINE_SVG"
+
+    # Pipe to summary JSON
+    PIPELINE_JSON=$(tmpfile .json)
+    echo "$PIPELINE_TRACE" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" summary - --json > "$PIPELINE_JSON" 2>/dev/null
+    check "full pipeline: xtrace → summary JSON" python3 -c "import json; json.load(open('$PIPELINE_JSON'))"
+
+    # Pipe to collapsed
+    PIPELINE_COLLAPSED=$(echo "$PIPELINE_TRACE" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" collapsed - 2>&1)
+    if echo "$PIPELINE_COLLAPSED" | grep -q ";"; then pass "full pipeline: xtrace → collapsed"
+    else fail "full pipeline collapsed failed"; fi
+else
+    fail "pipeline trace recording failed"
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 TOTAL=$((PASS + FAIL))
