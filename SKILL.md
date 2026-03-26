@@ -33,10 +33,11 @@ cmake --build . && xtrace ./build/app              # build then profile
 ## Prerequisites
 
 ```bash
-./install.sh    # installs to PATH, installs speedscope + inferno, registers skills
+./install.sh    # installs to PATH, registers skills, prompts for optional tools
 ```
 
-**Required:** Xcode or Command Line Tools, Python 3.8+, speedscope, inferno
+**Required:** Xcode or Command Line Tools, Python 3.8+
+**Recommended:** speedscope (`npm install -g speedscope`), inferno (`cargo install inferno`)
 
 **Debug symbols per toolchain:**
 

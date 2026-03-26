@@ -182,6 +182,15 @@ else
     pass "xtrace --no-summary suppresses summary"
 fi
 
+# Decimal duration (e.g. 2.5s)
+DECIMAL_DUR_TRACE="/tmp/xtrace_test_decimal_$(date +%s).trace"
+CLEANUP_FILES+=("$DECIMAL_DUR_TRACE")
+DECIMAL_DUR_PATH=$(bash "$SCRIPT_DIR/trace-record.sh" -d 1.5s -o "$DECIMAL_DUR_TRACE" -- /usr/bin/yes 2>/dev/null || true)
+if [ -n "$DECIMAL_DUR_PATH" ] && [ -e "$DECIMAL_DUR_PATH" ]; then
+    pass "trace-record.sh accepts decimal duration (1.5s)"
+else
+    fail "trace-record.sh rejects decimal duration (1.5s)"
+fi
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "━━━ 5. Analysis: summary ━━━"
@@ -270,10 +279,15 @@ BAD_LINES=$(echo "$COLLAPSED_OUT" | grep -cv ' [0-9]\+$' || true)
 if [ "$BAD_LINES" -eq 0 ]; then pass "collapsed format valid (every line ends with count)"
 else fail "collapsed has $BAD_LINES malformed lines"; fi
 
-# --module flag
-MODULE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --module 2>&1)
-if echo "$MODULE_OUT" | grep -q '\['; then pass "collapsed --module includes [module] tags"
-else fail "collapsed --module missing module tags"; fi
+# --with-module flag (new name)
+MODULE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --with-module 2>&1)
+if echo "$MODULE_OUT" | grep -q '\['; then pass "collapsed --with-module includes [module] tags"
+else fail "collapsed --with-module missing module tags"; fi
+
+# --module still works (backwards compat)
+MODULE_OUT2=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --module 2>&1)
+if echo "$MODULE_OUT2" | grep -q '\['; then pass "collapsed --module backwards compat"
+else fail "collapsed --module backwards compat broken"; fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -293,9 +307,18 @@ d = json.load(open('$JSON_FILE'))
 for f in d['functions']:
     f['self_pct'] = max(0, f['self_pct'] - 5.0)
     f['self_count'] = max(0, f['self_count'] - 10)
+    f['total_pct'] = max(0, f['total_pct'] - 3.0)
+    f['total_count'] = max(0, f['total_count'] - 5)
 json.dump(d, open('$MODIFIED_JSON', 'w'))
 " 2>/dev/null
 check_output "diff with changes shows IMPROVED" "IMPROVED" python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$MODIFIED_JSON"
+
+# diff shows both self and total columns
+DIFF_DETAIL=$(python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$MODIFIED_JSON" 2>&1)
+if echo "$DIFF_DETAIL" | grep -q "Δself"; then pass "diff shows Δself column"
+else fail "diff missing Δself column"; fi
+if echo "$DIFF_DETAIL" | grep -q "Δtotal"; then pass "diff shows Δtotal column"
+else fail "diff missing Δtotal column"; fi
 
 # --threshold flag
 check_output "diff --threshold 50 hides small changes" "UNCHANGED" python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$MODIFIED_JSON" --threshold 50
@@ -454,7 +477,8 @@ check_file "trace-flamegraph.sh --time-range" "$RANGE_SVG"
 check_output "time-range ms format" "Samples" python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "500ms-2500ms"
 
 # Open-ended range
-check_output "time-range open-ended (2s-)" "Samples" python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "2s-"
+# Open-ended range (use 0s- to guarantee samples regardless of trace density)
+check_output "time-range open-ended (0s-)" "Samples" python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "0s-"
 
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""

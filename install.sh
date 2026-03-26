@@ -98,33 +98,41 @@ else
     echo -e "  ${CYAN}·${NC} Claude Code: not detected"
 fi
 
-# ── Required tools ────────────────────────────────────────────────────────────
+# ── Optional tools ────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}Tools:${NC}"
 
 if command -v inferno-flamegraph &>/dev/null; then
     echo -e "  ${GREEN}✓${NC} inferno"
 else
-    echo -e "  Installing inferno (flamegraph generator)..." >&2
+    echo -e "  ${YELLOW}!${NC} inferno not found (flamegraph generator)"
     if command -v cargo &>/dev/null; then
-        cargo install inferno 2>&1 | tail -1
-        echo -e "  ${GREEN}✓${NC} inferno installed"
+        read -rp "  Install inferno via cargo? [y/N] " REPLY
+        if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+            cargo install inferno 2>&1 | tail -1
+            echo -e "  ${GREEN}✓${NC} inferno installed"
+        else
+            echo "      Skipped. Install later: cargo install inferno"
+        fi
     else
-        echo -e "  ${YELLOW}!${NC} cargo not found — install Rust first: https://rustup.rs"
-        echo "      Then: cargo install inferno"
+        echo "      Install Rust (https://rustup.rs), then: cargo install inferno"
     fi
 fi
 
 if command -v speedscope &>/dev/null; then
     echo -e "  ${GREEN}✓${NC} speedscope"
 else
-    echo -e "  Installing speedscope (interactive profiler UI)..." >&2
+    echo -e "  ${YELLOW}!${NC} speedscope not found (interactive profiler UI)"
     if command -v npm &>/dev/null; then
-        npm install -g speedscope 2>&1 | tail -1
-        echo -e "  ${GREEN}✓${NC} speedscope installed"
+        read -rp "  Install speedscope via npm? [y/N] " REPLY
+        if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+            npm install -g speedscope 2>&1 | tail -1
+            echo -e "  ${GREEN}✓${NC} speedscope installed"
+        else
+            echo "      Skipped. Install later: npm install -g speedscope"
+        fi
     else
-        echo -e "  ${YELLOW}!${NC} npm not found — install Node.js first"
-        echo "      Then: npm install -g speedscope"
+        echo "      Install Node.js first, then: npm install -g speedscope"
     fi
 fi
 

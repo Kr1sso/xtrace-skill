@@ -987,13 +987,13 @@ def _print_trie(node, total, min_pct, prefix='', is_last=True, is_root=False):
     else:
         prefix = ''
 
-    # Sort children by count descending
+    # Sort children by count descending, then filter before rendering
+    # so that is_last is computed against the visible list (correct tree chars)
     sorted_children = sorted(node.children.values(), key=lambda c: c.count, reverse=True)
-    for i, child in enumerate(sorted_children):
-        child_pct = child.count / total * 100 if total else 0
-        if child_pct < min_pct:
-            continue
-        _print_trie(child, total, min_pct, prefix, is_last=(i == len(sorted_children) - 1))
+    visible_children = [c for c in sorted_children
+                        if (c.count / total * 100 if total else 0) >= min_pct]
+    for i, child in enumerate(visible_children):
+        _print_trie(child, total, min_pct, prefix, is_last=(i == len(visible_children) - 1))
 
 
 # ---------------------------------------------------------------------------
@@ -1015,7 +1015,7 @@ def cmd_collapsed(args):
         print("No samples match the filter criteria.", file=sys.stderr)
         sys.exit(1)
 
-    include_module = args.module
+    include_module = args.include_module
 
     stacks = Counter()
     for s in samples:
@@ -1076,7 +1076,7 @@ def cmd_flamegraph(args):
         frames = list(reversed(s.frames))  # root-first
         node = flame_root
         for i, (func, mod) in enumerate(frames):
-            key = func
+            key = (func, mod)  # distinguish same-named functions in different modules
             if key not in node.children:
                 node.children[key] = FlameNode(func, mod)
             child = node.children[key]
@@ -1295,12 +1295,15 @@ def cmd_diff(args):
 
     threshold = args.threshold
 
-    # Build maps: (function, module) -> self_pct
+    # Build maps: (function, module) -> {self_pct, total_pct}
     def build_map(data):
         m = {}
         for entry in data.get('functions', []):
             key = (entry['function'], entry.get('module', ''))
-            m[key] = entry.get('self_pct', 0)
+            m[key] = {
+                'self_pct': entry.get('self_pct', 0),
+                'total_pct': entry.get('total_pct', 0),
+            }
         return m
 
     before_map = build_map(before)
@@ -1320,17 +1323,22 @@ def cmd_diff(args):
         func, mod = key
 
         if b is None:
-            new_funcs.append((func, mod, a))
+            new_funcs.append((func, mod, a['self_pct'], a['total_pct']))
         elif a is None:
-            gone_funcs.append((func, mod, b))
+            gone_funcs.append((func, mod, b['self_pct'], b['total_pct']))
         else:
-            delta = a - b
-            if delta < -threshold:
-                improved.append((func, mod, b, a, delta))
-            elif delta > threshold:
-                regressed.append((func, mod, b, a, delta))
+            self_delta = a['self_pct'] - b['self_pct']
+            total_delta = a['total_pct'] - b['total_pct']
+            # Classify by self_pct change (primary indicator), but show both
+            if self_delta < -threshold:
+                improved.append((func, mod, b['self_pct'], a['self_pct'], self_delta,
+                                 b['total_pct'], a['total_pct'], total_delta))
+            elif self_delta > threshold:
+                regressed.append((func, mod, b['self_pct'], a['self_pct'], self_delta,
+                                  b['total_pct'], a['total_pct'], total_delta))
             else:
-                unchanged.append((func, mod, b, a, delta))
+                unchanged.append((func, mod, b['self_pct'], a['self_pct'], self_delta,
+                                  b['total_pct'], a['total_pct'], total_delta))
 
     # Sort
     improved.sort(key=lambda x: x[4])      # most improved first (most negative)
@@ -1347,32 +1355,32 @@ def cmd_diff(args):
 
     if improved:
         print("IMPROVED ↓ (less CPU time):")
-        print(f"  {'Function':<36}  {'Before':>7}  {'After':>7}  {'Change':>8}")
-        for func, mod, b, a, delta in improved:
+        print(f"  {'Function':<36}  {'Self':>13}  {'Δself':>7}  {'Total':>14}  {'Δtotal':>8}")
+        for func, mod, bs, as_, sd, bt, at, td in improved:
             f_display = _truncate(func, 36)
-            print(f"  {f_display:<36}  {b:>6.1f}%  {a:>6.1f}%  {delta:>+7.1f}%  ⬇")
+            print(f"  {f_display:<36}  {bs:>5.1f}→{as_:>5.1f}%  {sd:>+6.1f}%  {bt:>5.1f}→{at:>5.1f}%  {td:>+7.1f}%  ⬇")
         print()
 
     if regressed:
         print("REGRESSED ↑ (more CPU time):")
-        print(f"  {'Function':<36}  {'Before':>7}  {'After':>7}  {'Change':>8}")
-        for func, mod, b, a, delta in regressed:
+        print(f"  {'Function':<36}  {'Self':>13}  {'Δself':>7}  {'Total':>14}  {'Δtotal':>8}")
+        for func, mod, bs, as_, sd, bt, at, td in regressed:
             f_display = _truncate(func, 36)
-            print(f"  {f_display:<36}  {b:>6.1f}%  {a:>6.1f}%  {delta:>+7.1f}%  ⬆")
+            print(f"  {f_display:<36}  {bs:>5.1f}→{as_:>5.1f}%  {sd:>+6.1f}%  {bt:>5.1f}→{at:>5.1f}%  {td:>+7.1f}%  ⬆")
         print()
 
     if new_funcs:
         print("NEW (only in optimized):")
-        for func, mod, a in new_funcs[:10]:
+        for func, mod, sp, tp in new_funcs[:10]:
             f_display = _truncate(func, 36)
-            print(f"  {f_display:<36}           {a:>6.1f}%  NEW")
+            print(f"  {f_display:<36}     self: {sp:>5.1f}%  total: {tp:>5.1f}%  NEW")
         print()
 
     if gone_funcs:
         print("GONE (only in baseline):")
-        for func, mod, b in gone_funcs[:10]:
+        for func, mod, sp, tp in gone_funcs[:10]:
             f_display = _truncate(func, 36)
-            print(f"  {f_display:<36}  {b:>6.1f}%          GONE")
+            print(f"  {f_display:<36}     self: {sp:>5.1f}%  total: {tp:>5.1f}%  GONE")
         print()
 
     if unchanged:
@@ -1380,9 +1388,9 @@ def cmd_diff(args):
         print(f"UNCHANGED (within ±{threshold:.1f}%): {unc_count} functions")
         # Show top 5
         unchanged.sort(key=lambda x: -max(x[2], x[3]))
-        for func, mod, b, a, delta in unchanged[:5]:
+        for func, mod, bs, as_, sd, bt, at, td in unchanged[:5]:
             f_display = _truncate(func, 36)
-            print(f"  {f_display:<36}  {b:>6.1f}%  {a:>6.1f}%  {delta:>+7.1f}%")
+            print(f"  {f_display:<36}  {bs:>5.1f}→{as_:>5.1f}%  {sd:>+6.1f}%  {bt:>5.1f}→{at:>5.1f}%  {td:>+7.1f}%")
         if unc_count > 5:
             print(f"  ... and {unc_count - 5} more")
 
@@ -1447,7 +1455,11 @@ def main():
     # -- collapsed ---------------------------------------------------------
     p_collapsed = subparsers.add_parser('collapsed', help='Collapsed stacks format (for flamegraph tools)')
     p_collapsed.add_argument('trace', help='Path to .trace file')
-    p_collapsed.add_argument('--module', action='store_true', help='Include module names in output')
+    p_collapsed.add_argument('--with-module', action='store_true', dest='include_module',
+                            help='Include [module] tags in output (e.g. "func [libfoo.dylib]")')
+    # Keep --module as hidden alias for backwards compatibility
+    p_collapsed.add_argument('--module', action='store_true', dest='include_module',
+                            help=argparse.SUPPRESS)
     add_filter_args(p_collapsed)
 
     # -- flamegraph --------------------------------------------------------

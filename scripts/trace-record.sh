@@ -118,10 +118,14 @@ if [ -n "$WAIT_FOR" ]; then
     echo "Waiting for process '$WAIT_FOR' to appear (timeout: ${WAIT_TIMEOUT}s)..." >&2
     ELAPSED=0
     FOUND_PID=""
+    MY_PID=$$
+    MY_PPID=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ')
     while [ "$ELAPSED" -lt "$WAIT_TIMEOUT" ]; do
         FOUND_PID=$(pgrep -x "$WAIT_FOR" 2>/dev/null | head -1 || true)
         if [ -z "$FOUND_PID" ]; then
-            FOUND_PID=$(pgrep -f "$WAIT_FOR" 2>/dev/null | head -1 || true)
+            # Fallback to pattern match, but exclude our own process tree to avoid
+            # matching "trace-record.sh --wait-for MyApp" itself
+            FOUND_PID=$(pgrep -f "$WAIT_FOR" 2>/dev/null | grep -v -e "^${MY_PID}$" -e "^${MY_PPID}$" | head -1 || true)
         fi
         if [ -n "$FOUND_PID" ]; then
             echo "Found '$WAIT_FOR' with PID $FOUND_PID" >&2
@@ -154,20 +158,37 @@ if ! xctrace list templates 2>/dev/null | grep -F "$TEMPLATE" >/dev/null; then
 fi
 
 # ── Parse duration ───────────────────────────────────────────────────────────
-# Accept: 10, 10s, 10m, 500ms — normalize to xctrace format
+# Accept: 10, 10s, 2.5s, 10m, 500ms — normalize to xctrace integer format
+# xctrace requires integer values, so 2.5s → 2500ms, 1.5m → 90s, etc.
 parse_duration() {
     local input="$1"
-    if [[ "$input" =~ ^([0-9]+)(ms|s|m)?$ ]]; then
+    if [[ "$input" =~ ^([0-9]*\.?[0-9]+)(ms|s|m)?$ ]]; then
         local num="${BASH_REMATCH[1]}"
         local unit="${BASH_REMATCH[2]}"
-        case "$unit" in
-            ms) echo "${num}ms" ;;
-            m)  echo "${num}m" ;;
-            s)  echo "${num}s" ;;
-            "") echo "${num}s" ;; # bare number → seconds
-        esac
+        : "${unit:=s}"  # bare number → seconds
+
+        # If the value has a decimal point, convert to a smaller unit
+        if [[ "$num" == *.* ]]; then
+            case "$unit" in
+                ms) # Already smallest unit — truncate to integer
+                    num=$(printf "%.0f" "$num")
+                    echo "${num}ms" ;;
+                s)  # Convert to ms: 2.5s → 2500ms
+                    num=$(printf "%.0f" "$(echo "$num * 1000" | bc)")
+                    echo "${num}ms" ;;
+                m)  # Convert to seconds: 1.5m → 90s
+                    num=$(printf "%.0f" "$(echo "$num * 60" | bc)")
+                    echo "${num}s" ;;
+            esac
+        else
+            case "$unit" in
+                ms) echo "${num}ms" ;;
+                m)  echo "${num}m" ;;
+                s)  echo "${num}s" ;;
+            esac
+        fi
     else
-        echo "Error: Invalid duration format: '$input'. Use: 10, 10s, 10m, or 500ms" >&2
+        echo "Error: Invalid duration format: '$input'. Use: 10, 10s, 2.5s, 10m, or 500ms" >&2
         exit 1
     fi
 }
@@ -252,7 +273,18 @@ echo "" >&2
 # ── Execute ──────────────────────────────────────────────────────────────────
 # Capture xctrace output to parse for the actual output path
 XCTRACE_OUTPUT_FILE=$(mktemp)
-trap 'rm -f "$XCTRACE_OUTPUT_FILE"' EXIT
+
+_cleanup() {
+    # Kill any xctrace child processes still running (e.g. if script is killed externally)
+    local kids
+    kids=$(jobs -p 2>/dev/null) || true
+    if [ -n "$kids" ]; then
+        kill $kids 2>/dev/null || true
+        wait $kids 2>/dev/null || true
+    fi
+    rm -f "$XCTRACE_OUTPUT_FILE"
+}
+trap _cleanup EXIT INT TERM
 
 set +e
 "${CMD[@]}" 2>&1 | tee "$XCTRACE_OUTPUT_FILE" >&2
@@ -283,10 +315,11 @@ if [ -z "$ACTUAL_OUTPUT" ] || [ ! -e "$ACTUAL_OUTPUT" ]; then
     fi
 fi
 
-# If still not found, look for recently created .trace files
+# If still not found, look for recently created .trace files in the output directory
 if [ -z "$ACTUAL_OUTPUT" ] || [ ! -e "$ACTUAL_OUTPUT" ]; then
-    # Find .trace files created in the last 60 seconds
-    RECENT=$(find . -maxdepth 1 -name "*.trace" -newer "$XCTRACE_OUTPUT_FILE" 2>/dev/null | head -1)
+    OUTPUT_DIR=$(dirname "$OUTPUT")
+    [ -z "$OUTPUT_DIR" ] && OUTPUT_DIR="."
+    RECENT=$(find "$OUTPUT_DIR" -maxdepth 1 -name "*.trace" -newer "$XCTRACE_OUTPUT_FILE" 2>/dev/null | head -1)
     if [ -n "$RECENT" ]; then
         ACTUAL_OUTPUT="$RECENT"
     fi

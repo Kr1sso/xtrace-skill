@@ -53,7 +53,7 @@ done
 
 # Support piping: trace ./app | trace-speedscope -
 if [ "$TRACE_FILE" = "-" ]; then
-    TRACE_FILE=$(head -1 | tr -d '[:space:]')
+    TRACE_FILE=$(head -1 | tr -d '\n\r')
 fi
 
 if [ -z "$TRACE_FILE" ]; then
