@@ -38,7 +38,7 @@ This does three things:
 
 1. **Symlinks scripts to PATH** (`~/.local/bin`) — `xtrace`, `trace-record`, `trace-analyze.py`, etc.
 2. **Installs as an AI agent skill** — Pi, Cursor, and Claude Code all use the same `SKILL.md` format. The installer symlinks this repo into each agent's skills directory.
-3. **Checks for optional tools** — inferno and speedscope for best visualizations.
+3. **Prompts to install optional tools** — inferno and speedscope for best visualizations.
 
 ```
 Skills:
@@ -94,7 +94,7 @@ xtrace [options] command [args...]
 
 | Option | Description |
 |---|---|
-| `-d DURATION` | Recording time limit (default: `30s`) |
+| `-d DURATION` | Recording time limit (default: `30s`). Accepts: `10`, `10s`, `2.5s`, `500ms`, `2m` |
 | `-t TEMPLATE` | Instruments template (default: `Time Profiler`) |
 | `-o PATH` | Output `.trace` file path (default: auto in `/tmp`) |
 | `--no-summary` | Skip the auto-printed summary |
@@ -125,7 +125,7 @@ trace-record.sh [options] [-- command args...]
 | Option | Description |
 |---|---|
 | `-t, --template NAME` | Template (default: `Time Profiler`) |
-| `-d, --duration SEC` | Duration: `10`, `10s`, `500ms`, `2m` (default: `10s`) |
+| `-d, --duration SEC` | Duration: `10`, `10s`, `2.5s`, `500ms`, `2m` (default: `10s`) |
 | `-o, --output PATH` | Output path (default: auto-timestamped) |
 | `-p, --pid PID` | Attach to running process by PID |
 | `-n, --name NAME` | Attach to running process by name |
@@ -247,7 +247,7 @@ trace-analyze.py calltree <trace> [--depth N] [--min-pct PCT]
 Output collapsed stacks: `frame1;frame2;...frameN count`
 
 ```bash
-trace-analyze.py collapsed <trace> [--module]
+trace-analyze.py collapsed <trace> [--with-module]
 ```
 
 This is the **standard input format** for every flamegraph tool in the ecosystem:
@@ -266,7 +266,7 @@ speedscope stacks.folded
 
 #### `diff` — Before/After Comparison
 
-Compare two JSON summaries to quantify optimization impact.
+Compare two JSON summaries to quantify optimization impact. Shows both self-time and total (inclusive) time changes.
 
 ```bash
 trace-analyze.py diff <before.json> <after.json> [--threshold PCT]
@@ -277,11 +277,12 @@ trace-analyze.py diff <before.json> <after.json> [--threshold PCT]
 Baseline: 9847 samples | Optimized: 9652 samples
 
 IMPROVED ↓ (less CPU time):
-  computeHash()                  23.8%    8.6%   -15.2%  ⬇
-  allocateBuffer()                5.2%    2.1%    -3.1%  ⬇
+  Function                              Self           Δself  Total            Δtotal
+  computeHash()                   23.8→ 8.6%  -15.2%  45.0→30.1%   -14.9%  ⬇
+  allocateBuffer()                 5.2→ 2.1%   -3.1%   8.3→ 5.0%    -3.3%  ⬇
 
 REGRESSED ↑ (more CPU time):
-  newOptimizedPath()              0.0%    2.0%    +2.0%  ⬆
+  newOptimizedPath()               0.0→ 2.0%   +2.0%   0.0→ 3.5%    +3.5%  ⬆
 ```
 
 ---

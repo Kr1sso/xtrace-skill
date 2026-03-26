@@ -30,7 +30,7 @@ Records a Time Profiler trace, prints a summary to stderr,
 and outputs the trace file path to stdout for piping.
 
 Options:
-  -d DURATION     Recording duration (default: 30s, or until process exits)
+  -d DURATION     Recording duration: 10, 10s, 2.5s, 500ms (default: 30s, or until exit)
   -t TEMPLATE     Instruments template (default: 'Time Profiler')
   -o PATH         Output .trace path (default: auto in /tmp)
   --no-summary    Skip auto-summary, just output trace path

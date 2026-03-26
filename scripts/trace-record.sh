@@ -13,7 +13,7 @@ Record an Instruments trace using xctrace.
 
 Options:
   -t, --template NAME     Template name (default: 'Time Profiler')
-  -d, --duration SECONDS  Time limit (default: 10s). Accepts: 10, 10s, 10m, 500ms
+  -d, --duration SECONDS  Time limit (default: 10s). Accepts: 10, 10s, 2.5s, 500ms, 10m
   -o, --output PATH       Output .trace path (auto-generated if omitted)
   -p, --pid PID           Attach to process by PID
   -n, --name NAME         Attach to process by name

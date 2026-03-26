@@ -1407,7 +1407,7 @@ def main():
                '  trace-analyze.py summary my.trace --top 20\n'
                '  trace-analyze.py timeline my.trace --window 100ms --adaptive\n'
                '  trace-analyze.py calltree my.trace --depth 15 --min-pct 2\n'
-               '  trace-analyze.py collapsed my.trace --module | flamegraph.pl > out.svg\n'
+               '  trace-analyze.py collapsed my.trace --with-module | flamegraph.pl > out.svg\n'
                '  trace-analyze.py flamegraph my.trace -o flame.svg --color-by module\n'
                '  trace-analyze.py diff before.json after.json --threshold 0.5\n',
         formatter_class=argparse.RawDescriptionHelpFormatter,

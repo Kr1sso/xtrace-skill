@@ -127,7 +127,7 @@ Confidence: `██` high (>50 samples), `▓░` medium (20-50), `░░` low (
 
 ### collapsed
 ```bash
-./scripts/trace-analyze.py collapsed <trace> [--module]
+./scripts/trace-analyze.py collapsed <trace> [--with-module]
 ```
 `frame1;frame2;...frameN count` — universal input for flamegraph tools.
 
