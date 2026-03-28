@@ -89,11 +89,81 @@ if [ -z "$TRACE_PATH" ] || [ ! -e "$TRACE_PATH" ]; then
     exit 1
 fi
 
-# Auto-summarize to stderr
+FINAL_PATH="$TRACE_PATH"
+
+# Auto-summarize to stderr (and detect empty traces for fallback)
 if [ "$SUMMARIZE" = true ]; then
     echo "" >&2
-    python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top "$TOP" >&2
+    set +e
+    python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top "$TOP" >&2 2>&1
+    SUMMARY_EXIT=$?
+    set -e
+
+    if [ "$SUMMARY_EXIT" -ne 0 ]; then
+        echo "" >&2
+        echo "⚠  No CPU samples in trace — Time Profiler only captures running threads." >&2
+        echo "   (GPU-bound, I/O-bound, or blocked workloads produce empty traces.)" >&2
+        echo "   Falling back to macOS sample command (captures all thread states)..." >&2
+        echo "" >&2
+
+        # Re-run the command under sample-quick.sh
+        # Convert duration to seconds for sample
+        SAMPLE_SECS=30
+        if [[ "$DURATION" =~ ^([0-9]+)(s|ms|m)?$ ]]; then
+            _NUM="${BASH_REMATCH[1]}"
+            _UNIT="${BASH_REMATCH[2]}"
+            case "$_UNIT" in
+                s|"") SAMPLE_SECS=$_NUM ;;
+                ms)   SAMPLE_SECS=$(( (_NUM + 999) / 1000 )) ;;
+                m)    SAMPLE_SECS=$(( _NUM * 60 )) ;;
+            esac
+        fi
+
+        set +e
+        SAMPLE_PATH=$("$SCRIPT_DIR/sample-quick.sh" --launch -d "$SAMPLE_SECS" -- "${CMD[@]}")
+        SAMPLE_EXIT=$?
+        set -e
+
+        if [ "$SAMPLE_EXIT" -eq 0 ] && [ -n "$SAMPLE_PATH" ] && [ -f "$SAMPLE_PATH" ]; then
+            FINAL_PATH="$SAMPLE_PATH"
+            echo "" >&2
+            python3 "$SCRIPT_DIR/trace-analyze.py" summary "$SAMPLE_PATH" --top "$TOP" >&2 || true
+        else
+            echo "   Fallback also failed. The empty trace may still be viewable in Instruments.app." >&2
+        fi
+    fi
+else
+    # With --no-summary, do a quick silent check and warn if empty
+    set +e
+    python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top 1 --json >/dev/null 2>&1
+    CHECK_EXIT=$?
+    set -e
+
+    if [ "$CHECK_EXIT" -ne 0 ]; then
+        echo "⚠  Trace appears empty (no CPU samples — workload likely GPU/IO-bound)." >&2
+        echo "   Falling back to macOS sample command..." >&2
+
+        SAMPLE_SECS=30
+        if [[ "$DURATION" =~ ^([0-9]+)(s|ms|m)?$ ]]; then
+            _NUM="${BASH_REMATCH[1]}"
+            _UNIT="${BASH_REMATCH[2]}"
+            case "$_UNIT" in
+                s|"") SAMPLE_SECS=$_NUM ;;
+                ms)   SAMPLE_SECS=$(( (_NUM + 999) / 1000 )) ;;
+                m)    SAMPLE_SECS=$(( _NUM * 60 )) ;;
+            esac
+        fi
+
+        set +e
+        SAMPLE_PATH=$("$SCRIPT_DIR/sample-quick.sh" --launch -d "$SAMPLE_SECS" -- "${CMD[@]}")
+        SAMPLE_EXIT=$?
+        set -e
+
+        if [ "$SAMPLE_EXIT" -eq 0 ] && [ -n "$SAMPLE_PATH" ] && [ -f "$SAMPLE_PATH" ]; then
+            FINAL_PATH="$SAMPLE_PATH"
+        fi
+    fi
 fi
 
-# Output trace path to stdout (for piping)
-echo "$TRACE_PATH"
+# Output final path to stdout (for piping)
+echo "$FINAL_PATH"

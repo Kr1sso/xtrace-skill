@@ -1,33 +1,40 @@
 #!/bin/bash
 # sample-quick.sh — Lightweight CPU profiling using macOS `sample` command
 # No Xcode required. Works with SIP enabled.
+# Captures ALL thread states (running + waiting), unlike Time Profiler.
 
 set -euo pipefail
 
 # ── Usage ────────────────────────────────────────────────────────────────────
 usage() {
     cat >&2 <<'EOF'
-Usage: sample-quick.sh <pid|process-name> [duration_seconds] [sampling_interval_ms] [output_file]
+Usage: sample-quick.sh [options] <pid|process-name> [duration] [interval] [output]
+       sample-quick.sh --launch [options] -- command [args...]
 
 Lightweight CPU profiling using macOS sample command.
+Captures ALL thread states (running + waiting + blocked).
 No Xcode required. Default: 10s duration, 1ms interval.
 
-Arguments:
-  pid|process-name    Target process (PID number or name to look up)
-  duration_seconds    How long to sample (default: 10)
-  sampling_interval_ms  Sampling interval in milliseconds (default: 1)
-  output_file         Output file path (auto-generated if omitted)
+Modes:
+  Attach mode:   sample-quick.sh <pid|name> [duration] [interval] [output]
+  Launch mode:   sample-quick.sh --launch [-d N] [-i N] [-o FILE] -- cmd args...
+
+Options (launch mode):
+  --launch              Launch a command and profile it
+  -d, --duration SECS   Sampling duration in seconds (default: 30)
+  -i, --interval MS     Sampling interval in milliseconds (default: 1)
+  -o, --output FILE     Output file path (auto-generated if omitted)
 
 Examples:
   sample-quick.sh 12345
   sample-quick.sh MyApp 5
-  sample-quick.sh MyApp 10 1 profile.txt
-  sample-quick.sh Safari 3 1
+  sample-quick.sh --launch -- ./my_app --benchmark
+  sample-quick.sh --launch -d 15 -- ./build/gpu_app
 
 Notes:
-  - The output file path is printed to stdout (for scripting).
-  - The call graph summary is printed to stderr.
-  - Use -mayDie flag to handle processes that may exit during sampling.
+  - Output file path is printed to stdout (for scripting).
+  - Progress and call graph summary go to stderr.
+  - Ideal for GPU/IO-bound workloads where Time Profiler returns no samples.
 EOF
     exit "${1:-1}"
 }
@@ -36,6 +43,13 @@ EOF
 BOLD='\033[1m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+# ── Validate sample command ──────────────────────────────────────────────────
+if ! command -v sample &>/dev/null; then
+    echo "Error: 'sample' command not found." >&2
+    echo "  The sample command should be available on all macOS installations." >&2
+    exit 1
+fi
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 if [ $# -lt 1 ]; then
@@ -47,35 +61,77 @@ if [ "$1" = "-h" ] || [ "$1" = "--help" ]; then
     usage 0
 fi
 
-TARGET="$1"
-DURATION="${2:-10}"
-INTERVAL="${3:-1}"
-OUTPUT="${4:-}"
+LAUNCH_MODE=false
+LAUNCH_CMD=()
+DURATION=""
+INTERVAL=""
+OUTPUT=""
 
-# ── Validate sample command ──────────────────────────────────────────────────
-if ! command -v sample &>/dev/null; then
-    echo "Error: 'sample' command not found." >&2
-    echo "  The sample command should be available on all macOS installations." >&2
-    exit 1
-fi
-
-# ── Resolve process name to PID ─────────────────────────────────────────────
-PROC_NAME=""
-if ! [[ "$TARGET" =~ ^[0-9]+$ ]]; then
-    PROC_NAME="$TARGET"
-    # Try exact match first
-    PID=$(pgrep -x "$TARGET" 2>/dev/null | head -1 || true)
-    if [ -z "$PID" ]; then
-        # Try partial/pattern match
-        PID=$(pgrep -f "$TARGET" 2>/dev/null | head -1 || true)
-    fi
-    if [ -z "$PID" ]; then
-        echo "Error: Process '$TARGET' not found" >&2
-        echo "  Make sure the process is running. Check with: ps aux | grep '$TARGET'" >&2
+if [ "$1" = "--launch" ]; then
+    LAUNCH_MODE=true
+    shift
+    DURATION="30"
+    INTERVAL="1"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d|--duration)  DURATION="$2"; shift 2 ;;
+            -i|--interval)  INTERVAL="$2"; shift 2 ;;
+            -o|--output)    OUTPUT="$2"; shift 2 ;;
+            -h|--help)      usage 0 ;;
+            --)             shift; LAUNCH_CMD=("$@"); break ;;
+            *)              LAUNCH_CMD=("$@"); break ;;
+        esac
+    done
+    if [ ${#LAUNCH_CMD[@]} -eq 0 ]; then
+        echo "Error: --launch requires a command. Use: --launch -- cmd args..." >&2
         exit 1
     fi
-    echo "Found process '$TARGET' with PID $PID" >&2
-    TARGET="$PID"
+    # Resolve relative paths
+    BINARY="${LAUNCH_CMD[0]}"
+    if [[ "$BINARY" != /* ]] && [ -e "$BINARY" ]; then
+        LAUNCH_CMD[0]=$(realpath "$BINARY" 2>/dev/null || echo "$BINARY")
+    fi
+else
+    TARGET="$1"
+    DURATION="${2:-10}"
+    INTERVAL="${3:-1}"
+    OUTPUT="${4:-}"
+fi
+
+# ── Launch mode: start the process ───────────────────────────────────────────
+PROC_NAME=""
+if [ "$LAUNCH_MODE" = true ]; then
+    PROC_NAME=$(basename "${LAUNCH_CMD[0]}")
+    # Launch process — stdout to /dev/null (so it doesn't mix with our path output),
+    # stderr passes through to terminal
+    "${LAUNCH_CMD[@]}" >/dev/null &
+    TARGET=$!
+
+    # Brief pause for the process to initialize
+    sleep 0.3
+
+    if ! kill -0 "$TARGET" 2>/dev/null; then
+        echo "Error: Process '${LAUNCH_CMD[0]}' exited immediately (PID $TARGET)." >&2
+        wait "$TARGET" 2>/dev/null || true
+        exit 1
+    fi
+    echo "Launched '$PROC_NAME' (PID $TARGET)" >&2
+else
+    # ── Attach mode: resolve process name to PID ─────────────────────────
+    if ! [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+        PROC_NAME="$TARGET"
+        PID=$(pgrep -x "$TARGET" 2>/dev/null | head -1 || true)
+        if [ -z "$PID" ]; then
+            PID=$(pgrep -f "$TARGET" 2>/dev/null | head -1 || true)
+        fi
+        if [ -z "$PID" ]; then
+            echo "Error: Process '$TARGET' not found" >&2
+            echo "  Make sure the process is running. Check with: ps aux | grep '$TARGET'" >&2
+            exit 1
+        fi
+        echo "Found process '$TARGET' with PID $PID" >&2
+        TARGET="$PID"
+    fi
 fi
 
 # ── Validate PID is running ─────────────────────────────────────────────────
@@ -121,6 +177,14 @@ fi
 if [ ! -f "$OUTPUT" ]; then
     echo "Error: Output file was not created" >&2
     exit 1
+fi
+
+# Wait for launched process to finish (kill if still running after sample completes)
+if [ "$LAUNCH_MODE" = true ]; then
+    if kill -0 "$TARGET" 2>/dev/null; then
+        kill "$TARGET" 2>/dev/null || true
+    fi
+    wait "$TARGET" 2>/dev/null || true
 fi
 
 # ── Print output path to stdout (for scripting) ─────────────────────────────

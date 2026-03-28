@@ -177,6 +177,237 @@ def _count_unsymbolicated(samples):
 
 
 # ---------------------------------------------------------------------------
+# Detect macOS sample command output
+# ---------------------------------------------------------------------------
+
+def _is_sample_file(path):
+    """Check if a file is macOS `sample` command output (not a .trace bundle)."""
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, 'r', errors='replace') as f:
+            head = f.read(512)
+        return ('Analysis of sampling' in head
+                or ('Process:' in head and 'Call graph' in head))
+    except (IOError, OSError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# macOS sample command output parser
+# ---------------------------------------------------------------------------
+
+class SampleOutputParser:
+    """Parse macOS `sample` command output into Sample objects.
+
+    The `sample` command captures *all* thread states (running + waiting),
+    making it invaluable for GPU-bound or I/O-bound workloads where the
+    Time Profiler (which only samples running threads) returns no data.
+
+    Output format:
+        Call graph:
+            3329 Thread_12345   DispatchQueue_1: com.apple.main-thread  (serial)
+            + 3329 start  (in dyld) + 6992  [0x18394bda4]
+            +   3204 main  (in myapp) + 27704  [0x102328578]
+            ...
+    """
+
+    # Match: tree-drawing prefix + count + rest
+    LINE_RE = re.compile(r'^([\s+!:|]*)(\d+)\s+(.+)$')
+    # Match: function_name  (in module) — greedy prefix to match LAST (in ...)
+    FUNC_MODULE_RE = re.compile(r'^(.*)\s+\(in\s+(.+?)\)')
+
+    def __init__(self):
+        self.trace_info = {}
+        self.samples = []
+
+    def parse_file(self, file_path):
+        """Parse a macOS sample command output file. Returns list[Sample]."""
+        with open(file_path, 'r', errors='replace') as f:
+            lines = f.readlines()
+
+        self._parse_metadata(lines)
+        cg_lines = self._extract_call_graph(lines)
+        if not cg_lines:
+            return []
+
+        threads = self._parse_call_graph(cg_lines)
+        samples = self._tree_to_samples(threads)
+        self.samples = samples
+        return samples
+
+    # -- metadata ----------------------------------------------------------
+
+    def _parse_metadata(self, lines):
+        info = {}
+        for line in lines[:30]:
+            if 'Analysis of sampling' in line:
+                m = re.search(r'sampling\s+(\S+)\s+\(pid\s+(\d+)\)', line)
+                if m:
+                    info['process_name'] = m.group(1)
+                    info['process_pid'] = m.group(2)
+                m2 = re.search(r'every\s+(\d+)\s+millisecond', line)
+                if m2:
+                    info['sample_interval_ms'] = int(m2.group(1))
+            elif line.startswith('Process:'):
+                m = re.search(r'Process:\s+(\S+)\s+\[(\d+)\]', line)
+                if m:
+                    info.setdefault('process_name', m.group(1))
+                    info.setdefault('process_pid', m.group(2))
+        # Try to find duration anywhere (sample may emit it late)
+        for line in lines:
+            if 'duration' in line.lower():
+                m = re.search(r'(\d+\.?\d*)\s*seconds', line)
+                if m:
+                    info['duration_s'] = float(m.group(1))
+                    break
+        info.setdefault('duration_s', 0)
+        info['template'] = 'macOS sample'
+        info['schemas'] = ['sample-output']
+        self.trace_info = info
+
+    # -- call graph extraction ---------------------------------------------
+
+    def _extract_call_graph(self, lines):
+        result = []
+        in_section = False
+        blank_run = 0
+        for line in lines:
+            stripped = line.strip()
+            if stripped == 'Call graph:':
+                in_section = True
+                blank_run = 0
+                continue
+            if in_section:
+                if stripped == '':
+                    blank_run += 1
+                    # Two consecutive blanks usually means end of section
+                    if blank_run >= 2:
+                        break
+                    continue
+                blank_run = 0
+                # Section-ending headers
+                if stripped.startswith('Total number') or stripped.startswith('Sort by'):
+                    break
+                result.append(line.rstrip('\n'))
+        return result
+
+    # -- call graph parsing ------------------------------------------------
+
+    def _parse_call_graph(self, lines):
+        """Parse call graph lines into per-thread trees.
+
+        Returns list of dicts: {'name', 'count', 'children': [node, ...]}.
+        Each child node: {'function', 'module', 'count', 'children': [...]}.
+        """
+        threads = []
+        current_thread = None
+        stack = []  # [(depth, node)]
+
+        # Detect base indent from first numeric line
+        base_indent = 4  # default
+        for line in lines:
+            m = self.LINE_RE.match(line)
+            if m:
+                base_indent = len(m.group(1))
+                break
+
+        for line in lines:
+            m = self.LINE_RE.match(line)
+            if not m:
+                continue
+
+            prefix_len = len(m.group(1))
+            count = int(m.group(2))
+            info = m.group(3).strip()
+            depth = max(0, (prefix_len - base_indent) // 2)
+
+            # Thread header: depth 0 and no "(in module)" pattern
+            fm = self.FUNC_MODULE_RE.match(info)
+            if depth == 0 and not fm:
+                if current_thread is not None:
+                    threads.append(current_thread)
+                current_thread = {
+                    'name': info,
+                    'count': count,
+                    'children': [],
+                }
+                stack = [(0, current_thread)]
+                continue
+
+            # Regular function node
+            if fm:
+                func_name = fm.group(1).strip()
+                module = fm.group(2).strip()
+            else:
+                func_name = info
+                module = ''
+
+            node = {
+                'function': func_name,
+                'module': module,
+                'count': count,
+                'children': [],
+            }
+
+            # Pop stack to find parent (first node at shallower depth)
+            while stack and stack[-1][0] >= depth:
+                stack.pop()
+
+            if stack:
+                stack[-1][1]['children'].append(node)
+            elif current_thread:
+                current_thread['children'].append(node)
+
+            stack.append((depth, node))
+
+        if current_thread is not None:
+            threads.append(current_thread)
+
+        return threads
+
+    # -- tree → samples conversion -----------------------------------------
+
+    def _tree_to_samples(self, threads):
+        """Walk thread trees and emit one Sample per self-count unit."""
+        samples = []
+        proc_name = self.trace_info.get('process_name', '')
+        proc_pid = self.trace_info.get('process_pid', '')
+        proc_fmt = f"{proc_name} ({proc_pid})" if proc_pid else proc_name
+
+        for thread in threads:
+            thread_name = thread.get('name', '')
+            for root in thread.get('children', []):
+                self._collect(root, [], samples, thread_name, proc_fmt, proc_pid)
+        return samples
+
+    def _collect(self, node, path, samples, thread_name, proc_fmt, proc_pid):
+        frame = (node['function'], node['module'])
+        current_path = path + [frame]
+
+        child_sum = sum(c['count'] for c in node['children'])
+        self_count = max(0, node['count'] - child_sum)
+
+        if self_count > 0:
+            frames = list(reversed(current_path))  # leaf-first
+            for _ in range(self_count):
+                samples.append(Sample(
+                    time_ns=0,
+                    thread_fmt=thread_name,
+                    thread_id='',
+                    process_fmt=proc_fmt,
+                    process_pid=proc_pid,
+                    core_fmt='',
+                    state='',
+                    weight_ns=1_000_000,
+                    frames=frames,
+                ))
+
+        for child in node['children']:
+            self._collect(child, current_path, samples, thread_name, proc_fmt, proc_pid)
+
+
+# ---------------------------------------------------------------------------
 # XML trace parser
 # ---------------------------------------------------------------------------
 
@@ -191,9 +422,17 @@ class TraceParser:
     # -- public API --------------------------------------------------------
 
     def parse_trace(self, trace_path, schema='time-profile'):
-        """Export and parse a .trace bundle. Returns list[Sample]."""
+        """Export and parse a .trace bundle or sample output. Returns list[Sample]."""
         if not os.path.exists(trace_path):
             raise FileNotFoundError(f"Trace file not found: {trace_path}")
+
+        # Auto-detect macOS sample command output (regular file, not .trace dir)
+        if os.path.isfile(trace_path) and _is_sample_file(trace_path):
+            sp = SampleOutputParser()
+            samples = sp.parse_file(trace_path)
+            self.trace_info = sp.trace_info
+            self.samples = samples
+            return samples
 
         # 1. TOC
         toc_xml = self._run_xctrace(trace_path, toc=True)
@@ -324,6 +563,17 @@ class TraceParser:
         # Backtrace / kperf-bt: list of frames
         if tag in ('backtrace', 'kperf-bt'):
             data = self._parse_backtrace(elem, tag)
+            if eid:
+                self.id_registry[eid] = data
+            return data
+
+        # tagged-backtrace: wrapper around <backtrace> (macOS 26 / Xcode 17+)
+        if tag == 'tagged-backtrace':
+            bt_child = elem.find('backtrace')
+            if bt_child is not None:
+                data = self._parse_backtrace(bt_child, 'backtrace')
+            else:
+                data = self._parse_backtrace(elem, 'backtrace')
             if eid:
                 self.id_registry[eid] = data
             return data

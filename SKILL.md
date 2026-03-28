@@ -21,14 +21,14 @@ cmake --build . && xtrace ./build/app              # build then profile
 
 | Script | Purpose |
 |---|---|
-| **`xtrace`** | Record + summarize. Prefix any command. Path to stdout. |
+| **`xtrace`** | Record + summarize. Prefix any command. Path to stdout. Auto-fallback for GPU/IO-bound workloads. |
 | `trace-record.sh` | Record with full control (attach, wait-for, system-wide, templates) |
-| `trace-analyze.py` | Analysis engine: summary, timeline, calltree, collapsed, diff |
+| `trace-analyze.py` | Analysis engine: summary, timeline, calltree, collapsed, diff. Reads .trace and sample output. |
 | `trace-speedscope.sh` | **Interactive visualization** (speedscope web UI) |
 | `trace-flamegraph.sh` | Generate SVG flamegraph file (for sharing/archiving) |
 | `trace-diff-flamegraph.sh` | Differential red/blue SVG between two traces |
 | `trace-check.sh` | Verify environment |
-| `sample-quick.sh` | Lightweight profiling via macOS `sample` (no Xcode needed) |
+| `sample-quick.sh` | Lightweight profiling via macOS `sample` (no Xcode needed). Supports `--launch`. |
 
 ## Prerequisites
 
@@ -164,11 +164,34 @@ trace-diff-flamegraph.sh before.trace after.trace -o diff.svg
 | `_platform_mem*` | Memory ops dominating | Check data layout, sizes |
 | `malloc`/`free` heavy | Allocation churn | Pool, arena, reduce allocations |
 
+## GPU/IO-Bound Workloads
+
+`xtrace` automatically handles GPU-bound and IO-bound workloads:
+
+1. Records with Time Profiler (captures running threads at 1ms sampling)
+2. If the trace has no CPU samples (process spent all time waiting), falls back to macOS `sample` command
+3. `sample` captures ALL thread states (running + waiting + blocked), so it always produces data
+4. `trace-analyze.py` transparently reads both `.trace` bundles and `sample` output files
+
+```bash
+# GPU-bound app — xtrace auto-falls back to sample if needed
+xtrace ./build/gpu_app --benchmark
+
+# Or use sample directly for launch + profile
+sample-quick.sh --launch -d 10 -- ./build/gpu_app --benchmark
+
+# All analysis tools work on sample output too
+trace-analyze.py summary /tmp/sample_gpu_app_*.txt --top 20
+trace-analyze.py calltree /tmp/sample_gpu_app_*.txt --min-pct 3
+trace-analyze.py collapsed /tmp/sample_gpu_app_*.txt | inferno-flamegraph > flame.svg
+```
+
 ## Troubleshooting
 
 | Problem | Fix |
 |---|---|
 | `xctrace not found` | `xcode-select --install` |
-| No samples | Ensure workload is CPU-active during recording |
+| No samples | `xtrace` auto-falls back to `sample`. Or use `sample-quick.sh --launch` directly |
 | Unsymbolicated frames | Rebuild with `-g`, ensure `.dSYM` present |
 | Processor Trace errors | System Settings → Privacy & Security → Developer Tools |
+| Empty trace from GPU app | Normal — Time Profiler only samples running threads. Fallback handles this automatically |
