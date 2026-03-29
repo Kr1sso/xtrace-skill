@@ -779,6 +779,31 @@ class TraceParser:
 
 
 # ---------------------------------------------------------------------------
+# Helper: no-samples error with memory-template hint
+# ---------------------------------------------------------------------------
+
+_MEMORY_TEMPLATES = {'Allocations', 'Leaks', 'Game Memory'}
+
+def _no_samples_error(parser):
+    """Print 'no samples' and, if the trace is a memory template, add a hint."""
+    tmpl = parser.trace_info.get('template', '')
+    if tmpl in _MEMORY_TEMPLATES:
+        print(
+            f"This trace uses the '{tmpl}' template.\n"
+            "Allocations/Leaks data cannot be exported via the xctrace CLI.\n"
+            "For CLI memory analysis use:\n"
+            "  trace-memory.py summary -- <command>\n"
+            "  trace-memory.py leaks   -- <command>\n"
+            "Or inspect the trace:\n"
+            "  trace-analyze.py info <trace>",
+            file=sys.stderr,
+        )
+    else:
+        print("No samples match the filter criteria.", file=sys.stderr)
+    sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
 # Subcommand: summary
 # ---------------------------------------------------------------------------
 
@@ -795,8 +820,7 @@ def cmd_summary(args):
     )
 
     if not samples:
-        print("No samples match the filter criteria.", file=sys.stderr)
-        sys.exit(1)
+        _no_samples_error(parser)
 
     total = len(samples)
 
@@ -917,8 +941,7 @@ def cmd_timeline(args):
     )
 
     if not samples:
-        print("No samples match the filter criteria.", file=sys.stderr)
-        sys.exit(1)
+        _no_samples_error(parser)
 
     total = len(samples)
     window_ns = parse_duration_ns(args.window)
@@ -1188,8 +1211,7 @@ def cmd_calltree(args):
     )
 
     if not samples:
-        print("No samples match the filter criteria.", file=sys.stderr)
-        sys.exit(1)
+        _no_samples_error(parser)
 
     total = len(samples)
     max_depth = args.depth
@@ -1269,8 +1291,7 @@ def cmd_collapsed(args):
     )
 
     if not samples:
-        print("No samples match the filter criteria.", file=sys.stderr)
-        sys.exit(1)
+        _no_samples_error(parser)
 
     include_module = args.include_module
 
@@ -1318,8 +1339,7 @@ def cmd_flamegraph(args):
     )
 
     if not samples:
-        print("No samples match the filter criteria.", file=sys.stderr)
-        sys.exit(1)
+        _no_samples_error(parser)
 
     total = len(samples)
 
