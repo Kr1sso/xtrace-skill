@@ -1,34 +1,39 @@
 ---
 name: instruments
-description: "Profile macOS applications using Instruments/xctrace. Record CPU traces, analyze hotspots, generate flamegraphs, compare profiles, drill into time windows."
+description: "Profile macOS applications using Instruments/xctrace. Record CPU traces, analyze hotspots, generate flamegraphs, compare profiles, drill into time windows. Detect memory leaks, track memory growth, analyze heap allocations."
 ---
 
 # Instruments Profiling Skill
 
-Unix-style CPU profiling for macOS. Composable tools that pipe together.
+Unix-style profiling for macOS. Composable tools that pipe together.
 
 ## Quick Start
 
 ```bash
+# CPU profiling
 xtrace ./my_app                                    # record + print summary
 xtrace ./my_app | trace-speedscope -               # → interactive analysis (best)
-cmake --build . && xtrace ./build/app              # build then profile
-```
 
-`xtrace` records a trace, prints summary to stderr, outputs trace path to stdout. All tools accept `-` to read the trace path from stdin.
+# Memory analysis
+trace-memory.py summary -- ./my_app                # memory overview
+trace-memory.py leaks -- ./my_app                   # detect leaks
+trace-memory.py growth -d 30 -- ./my_app            # track growth over time
+xtrace -t Allocations ./my_app                      # Instruments trace + memory summary
+```
 
 ## Scripts
 
 | Script | Purpose |
 |---|---|
-| **`xtrace`** | Record + summarize. Prefix any command. Path to stdout. Auto-fallback for GPU/IO-bound workloads. |
+| **`xtrace`** | Record + summarize. Prefix any command. Auto-detects template type. |
 | `trace-record.sh` | Record with full control (attach, wait-for, system-wide, templates) |
-| `trace-analyze.py` | Analysis engine: summary, timeline, calltree, collapsed, diff. Reads .trace and sample output. |
-| `trace-speedscope.sh` | **Interactive visualization** (speedscope web UI) |
-| `trace-flamegraph.sh` | Generate SVG flamegraph file (for sharing/archiving) |
+| `trace-analyze.py` | CPU analysis: summary, timeline, calltree, collapsed, diff, info |
+| **`trace-memory.py`** | **Memory analysis: summary, leaks, growth, regions, heap** |
+| `trace-speedscope.sh` | Interactive visualization (speedscope web UI) |
+| `trace-flamegraph.sh` | Generate SVG flamegraph file |
 | `trace-diff-flamegraph.sh` | Differential red/blue SVG between two traces |
 | `trace-check.sh` | Verify environment |
-| `sample-quick.sh` | Lightweight profiling via macOS `sample` (no Xcode needed). Supports `--launch`. |
+| `sample-quick.sh` | Lightweight profiling via macOS `sample` |
 
 ## Prerequisites
 
@@ -50,140 +55,179 @@ cmake --build . && xtrace ./build/app              # build then profile
 | Xcode | Debug has symbols; Release needs dSYM in build settings |
 | CMake | `-DCMAKE_BUILD_TYPE=RelWithDebInfo` |
 
-## Dev Loop
+## CPU Profiling
+
+### Dev Loop
 
 ```bash
 # 1. Profile
 BASELINE=$(xtrace -d 10 ./build/my_app --benchmark)
-# → reads summary from stderr, e.g. "computeHash() is 24% self time"
 
 # 2. Visualize interactively
 trace-speedscope.sh "$BASELINE"
 
 # 3. Save baseline for comparison
-./scripts/trace-analyze.py summary "$BASELINE" --json > /tmp/before.json
+trace-analyze.py summary "$BASELINE" --json > /tmp/before.json
 
 # 4. Fix the hotspot, rebuild, re-profile
 cmake --build .
 AFTER=$(xtrace -d 10 ./build/my_app --benchmark)
-./scripts/trace-analyze.py summary "$AFTER" --json > /tmp/after.json
+trace-analyze.py summary "$AFTER" --json > /tmp/after.json
 
 # 5. Compare
-./scripts/trace-analyze.py diff /tmp/before.json /tmp/after.json
+trace-analyze.py diff /tmp/before.json /tmp/after.json
 ```
 
 ### LLM Pattern
 
 ```bash
-TRACE=$(./scripts/xtrace -d 10 --no-summary ./build/my_app)
-./scripts/trace-analyze.py summary "$TRACE" --json --top 20 > profile.json
-./scripts/trace-analyze.py calltree "$TRACE" --min-pct 3.0
+TRACE=$(xtrace -d 10 --no-summary ./build/my_app)
+trace-analyze.py summary "$TRACE" --json --top 20 > profile.json
+trace-analyze.py calltree "$TRACE" --min-pct 3.0
 ```
 
-Read the JSON, identify hotspot, make changes, rebuild, re-profile, diff.
-
-## Recording
-
-`xtrace` covers launch mode. For attach/wait/system-wide, use `trace-record.sh`:
+### Recording
 
 ```bash
-./scripts/trace-record.sh -d 10 -p <PID>                    # attach by PID
-./scripts/trace-record.sh -d 10 -n MyApp                    # attach by name
-./scripts/trace-record.sh --wait-for MyApp -d 10             # wait for spawn, then attach
-./scripts/trace-record.sh --wait-for MyApp --wait-timeout 60 -d 10
-./scripts/trace-record.sh -d 10 -a                           # system-wide
-./scripts/trace-record.sh -t 'System Trace' -d 10 -- ./app  # different template
+trace-record.sh -d 10 -p <PID>                    # attach by PID
+trace-record.sh -d 10 -n MyApp                    # attach by name
+trace-record.sh --wait-for MyApp -d 10             # wait for spawn
+trace-record.sh -d 10 -a                           # system-wide
+trace-record.sh -t 'System Trace' -d 10 -- ./app  # different template
+```
+
+### Analysis Subcommands
+
+All support `--process`, `--thread`, `--time-range`, and `-` for stdin.
+
+```bash
+trace-analyze.py summary <trace> [--top N] [--by self|total] [--json]
+trace-analyze.py timeline <trace> [--window SIZE] [--adaptive] [--json]
+trace-analyze.py calltree <trace> [--depth N] [--min-pct PCT]
+trace-analyze.py collapsed <trace> [--with-module]
+trace-analyze.py info <trace> [--json]              # show trace metadata & contents
+trace-analyze.py diff <before.json> <after.json> [--threshold PCT]
+```
+
+### Visualization
+
+```bash
+xtrace ./app | trace-speedscope -                    # interactive (best)
+trace-flamegraph.sh recording.trace -o profile.svg   # SVG file
+trace-diff-flamegraph.sh before.trace after.trace -o diff.svg
+```
+
+## Memory Analysis
+
+### Quick Memory Check
+
+```bash
+# Overview of memory usage
+trace-memory.py summary -- ./my_app --benchmark
+
+# Check for leaks (with allocation backtraces)
+trace-memory.py leaks -- ./my_app
+
+# Analyze a running process
+trace-memory.py summary -p <PID>
+trace-memory.py leaks -p <PID>
+```
+
+### Track Memory Growth
+
+```bash
+# Watch memory over 30 seconds with 2s snapshots
+trace-memory.py growth -d 30 --interval 2 -- ./my_app --serve
+
+# JSON for programmatic analysis
+trace-memory.py growth -d 30 --json -- ./my_app > memory_growth.json
+```
+
+### Detailed Analysis
+
+```bash
+# All VM regions with sizes
+trace-memory.py regions -p <PID>
+
+# Heap allocations by class/type
+trace-memory.py heap -p <PID>
+
+# Combine with Instruments recording
+xtrace -t Allocations -- ./my_app    # records trace + shows memory summary
+xtrace -t Leaks -- ./my_app           # records trace + shows leak report
+```
+
+### Memory + Instruments Workflow
+
+```bash
+# 1. Quick CLI check
+trace-memory.py leaks -- ./my_app
+# → Found 3 leaks!
+
+# 2. Record Instruments trace for deep analysis
+trace-record.sh -t Allocations -d 30 -- ./my_app
+# → Open .trace in Instruments.app for allocation timeline, call trees
+
+# 3. Track memory over time
+trace-memory.py growth -d 60 --json -- ./my_app > growth.json
+# → Identify which regions are growing
+
+# 4. Inspect trace metadata
+trace-analyze.py info recording.trace
+```
+
+### LLM Pattern for Memory
+
+```bash
+# Quick leak check
+trace-memory.py leaks --json -- ./my_app > leaks.json
+
+# Memory overview
+trace-memory.py summary --json -p <PID> > memory.json
+
+# Growth tracking
+trace-memory.py growth -d 20 --json -- ./my_app > growth.json
 ```
 
 ## Templates
 
-| Template | When | Resolution |
-|---|---|---|
-| **Time Profiler** | General CPU profiling (default) | 1ms sampling |
-| System Trace | Thread contention, syscalls, scheduling | Microsecond |
-| Processor Trace | Every function call, instruction-level | Every branch |
-| CPU Counters | IPC, cache misses, branch mispredictions | Per-event |
-| Allocations | Memory leaks, allocation patterns | Per-allocation |
-
-## Analysis
-
-All subcommands support `--process`, `--thread`, `--time-range`, and `-` for stdin.
-
-### summary
-```bash
-./scripts/trace-analyze.py summary <trace> [--top N] [--by self|total] [--json]
-```
-
-### timeline
-```bash
-./scripts/trace-analyze.py timeline <trace> [--window SIZE] [--adaptive] [--top N] [--json]
-```
-Confidence: `██` high (>50 samples), `▓░` medium (20-50), `░░` low (<20). `← SPIKE` = >2× median.
-
-### calltree
-```bash
-./scripts/trace-analyze.py calltree <trace> [--depth N] [--min-pct PCT]
-```
-
-### collapsed
-```bash
-./scripts/trace-analyze.py collapsed <trace> [--with-module]
-```
-`frame1;frame2;...frameN count` — universal input for flamegraph tools.
-
-### diff
-```bash
-./scripts/trace-analyze.py diff <before.json> <after.json> [--threshold PCT]
-```
-
-## Visualization
-
-**Interactive (use this):**
-```bash
-xtrace ./app | trace-speedscope -                        # pipe directly
-trace-speedscope.sh /tmp/my.trace                        # from file
-trace-speedscope.sh /tmp/my.trace --time-range 3.2s-3.5s # time window
-```
-
-Speedscope opens in browser with time-ordered view, left-heavy view, sandwich view, zoom, search.
-
-**SVG files (for sharing/CI/archiving only):**
-```bash
-trace-flamegraph.sh recording.trace -o profile.svg
-trace-diff-flamegraph.sh before.trace after.trace -o diff.svg
-```
+| Template | When | Tool | Resolution |
+|---|---|---|---|
+| **Time Profiler** | General CPU profiling (default) | trace-analyze.py | 1ms sampling |
+| System Trace | Thread contention, syscalls | Instruments.app | Microsecond |
+| Processor Trace | Every function call | trace-analyze.py | Every branch |
+| CPU Counters | IPC, cache misses | Instruments.app | Per-event |
+| **Allocations** | Memory usage, allocation patterns | **trace-memory.py** | Per-allocation |
+| **Leaks** | Memory leaks | **trace-memory.py** | Per-allocation |
+| Game Memory | Game memory budgets | trace-memory.py | Per-allocation |
 
 ## Interpreting Results
 
+### CPU Patterns
+
 | Pattern | Meaning | Action |
 |---|---|---|
-| High self time | Function body is bottleneck | Optimize algorithm, data layout |
+| High self time | Function body is bottleneck | Optimize algorithm |
 | High inclusive, low self | Calls something expensive | Look at callees |
-| `<deduplicated_symbol>` | Compiler-merged bodies | Normal for V8/system code |
-| `0x1a2b3c...` | Missing debug symbols | Rebuild with `-g` |
-| `_platform_mem*` | Memory ops dominating | Check data layout, sizes |
 | `malloc`/`free` heavy | Allocation churn | Pool, arena, reduce allocations |
+
+### Memory Patterns
+
+| Pattern | Meaning | Action |
+|---|---|---|
+| Growing RSS over time | Memory leak or unbounded cache | Run `leaks`, check growth regions |
+| Large IOKit/IOAccelerator | GPU memory (Metal/MLX) | Check GPU buffer lifecycle |
+| High dirty, low resident | Swapping pressure | Reduce working set |
+| MALLOC_LARGE growing | Large heap allocations | Check for unbounded collections |
+| Many leaks from one stack | Systematic leak pattern | Fix the allocation/release pair |
 
 ## GPU/IO-Bound Workloads
 
-`xtrace` automatically handles GPU-bound and IO-bound workloads:
-
-1. Records with Time Profiler (captures running threads at 1ms sampling)
-2. If the trace has no CPU samples (process spent all time waiting), falls back to macOS `sample` command
-3. `sample` captures ALL thread states (running + waiting + blocked), so it always produces data
-4. `trace-analyze.py` transparently reads both `.trace` bundles and `sample` output files
+`xtrace` automatically handles GPU/IO-bound workloads — falls back to `sample` if Time Profiler returns no data.
 
 ```bash
-# GPU-bound app — xtrace auto-falls back to sample if needed
-xtrace ./build/gpu_app --benchmark
-
-# Or use sample directly for launch + profile
-sample-quick.sh --launch -d 10 -- ./build/gpu_app --benchmark
-
-# All analysis tools work on sample output too
-trace-analyze.py summary /tmp/sample_gpu_app_*.txt --top 20
-trace-analyze.py calltree /tmp/sample_gpu_app_*.txt --min-pct 3
-trace-analyze.py collapsed /tmp/sample_gpu_app_*.txt | inferno-flamegraph > flame.svg
+xtrace ./build/gpu_app --benchmark      # auto-fallback
+sample-quick.sh --launch -d 10 -- ./build/gpu_app  # direct sample
 ```
 
 ## Troubleshooting
@@ -191,7 +235,9 @@ trace-analyze.py collapsed /tmp/sample_gpu_app_*.txt | inferno-flamegraph > flam
 | Problem | Fix |
 |---|---|
 | `xctrace not found` | `xcode-select --install` |
-| No samples | `xtrace` auto-falls back to `sample`. Or use `sample-quick.sh --launch` directly |
-| Unsymbolicated frames | Rebuild with `-g`, ensure `.dSYM` present |
-| Processor Trace errors | System Settings → Privacy & Security → Developer Tools |
-| Empty trace from GPU app | Normal — Time Profiler only samples running threads. Fallback handles this automatically |
+| No samples | `xtrace` auto-falls back to `sample` |
+| Unsymbolicated frames | Rebuild with `-g` |
+| Allocations trace empty in CLI | Normal — use `trace-memory.py` or open in Instruments.app |
+| `leaks` needs backtraces | Launch with `MallocStackLogging=1` (automatic in trace-memory.py) |
+| Permission denied for vmmap | Run with `sudo` or profile your own processes |
+| Process exits too fast | Increase duration or add a sleep/wait in target app |
