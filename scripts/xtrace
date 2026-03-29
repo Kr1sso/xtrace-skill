@@ -44,6 +44,10 @@ Pipe to other tools:
   cmake --build . && xtrace ./app            # build then profile
   TRACE=$(xtrace ./app); trace-analyze summary $TRACE  # save path
 
+Memory profiling:
+  xtrace -t Allocations ./app         # memory summary + trace
+  xtrace -t Leaks ./app                # leak detection + trace
+
 EOF
     exit "${1:-1}"
 }
@@ -79,6 +83,77 @@ fi
 if [ -z "$OUTPUT" ]; then
     BIN_NAME=$(basename "${CMD[0]}")
     OUTPUT="/tmp/trace_${BIN_NAME}_$(date +%Y%m%d_%H%M%S).trace"
+fi
+
+# ── Memory template handling ─────────────────────────────────────────────────
+# For memory templates, we orchestrate: launch → attach xctrace → live analysis
+_is_memory_template() {
+    case "$1" in
+        Allocations|Leaks|"Game Memory") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if _is_memory_template "$TEMPLATE" && [ ${#CMD[@]} -gt 0 ]; then
+    # Memory template with launch mode — use trace-memory.py orchestration
+
+    # Resolve binary (trace-record.sh normally does this)
+    BINARY="${CMD[0]}"
+    if [[ "$BINARY" != /* ]]; then
+        if command -v "$BINARY" &>/dev/null; then
+            CMD[0]=$(command -v "$BINARY")
+        elif [ -e "$BINARY" ]; then
+            CMD[0]=$(realpath "$BINARY" 2>/dev/null || echo "$BINARY")
+        fi
+    fi
+
+    # Launch the process with MallocStackLogging
+    echo "Launching with MallocStackLogging for memory analysis..." >&2
+    MallocStackLogging=1 "${CMD[@]}" &>/dev/null &
+    TARGET_PID=$!
+    sleep 0.5
+
+    if ! kill -0 "$TARGET_PID" 2>/dev/null; then
+        echo "Error: Process exited immediately" >&2
+        exit 1
+    fi
+
+    BIN_NAME=$(basename "${CMD[0]}")
+    echo "Process: $BIN_NAME (PID $TARGET_PID)" >&2
+
+    # Start xctrace recording attached to PID in background
+    "$SCRIPT_DIR/trace-record.sh" -t "$TEMPLATE" -d "$DURATION" -o "$OUTPUT" --no-malloc-logging -p "$TARGET_PID" &>/dev/null &
+    XCTRACE_BG_PID=$!
+
+    # Run memory analysis
+    echo "" >&2
+    MEMORY_MODE="summary"
+    case "$TEMPLATE" in
+        Leaks) MEMORY_MODE="leaks" ;;
+    esac
+
+    if [ "$SUMMARIZE" = true ]; then
+        python3 "$SCRIPT_DIR/trace-memory.py" "$MEMORY_MODE" -p "$TARGET_PID" --top "$TOP" >&2 || true
+    fi
+
+    # Wait a bit then clean up
+    sleep 2
+    kill "$TARGET_PID" 2>/dev/null || true
+    wait "$TARGET_PID" 2>/dev/null || true
+    wait "$XCTRACE_BG_PID" 2>/dev/null || true
+
+    # Find the trace file
+    FINAL_PATH="$OUTPUT"
+    if [ -e "$OUTPUT" ]; then
+        FINAL_PATH=$(cd "$(dirname "$OUTPUT")" && echo "$(pwd)/$(basename "$OUTPUT")")
+    fi
+
+    TRACE_SIZE=$(du -sh "$FINAL_PATH" 2>/dev/null | cut -f1 || echo "?")
+    echo "" >&2
+    echo "Trace saved: $FINAL_PATH ($TRACE_SIZE)" >&2
+    echo "Open in Instruments.app for full allocation details" >&2
+    echo "$FINAL_PATH"
+    exit 0
 fi
 
 # Record — trace-record.sh prints path to stdout, progress to stderr

@@ -8,6 +8,7 @@ Subcommands:
   collapsed  Collapsed stacks format (for flamegraph tools)
   flamegraph Generate interactive SVG flamegraph
   diff       Compare two profile summaries
+  info       Show trace file contents and metadata
 
 Requires: xctrace (from Xcode) for trace export.
 No external Python dependencies — stdlib only.
@@ -459,7 +460,13 @@ class TraceParser:
 
         raise RuntimeError(
             f"Failed to export trace data. Last error: {last_err}\n"
-            "Check that the .trace file contains a Time Profiler or time-sample table."
+            f"Template: {self.trace_info.get('template', 'Unknown')}\n"
+            + ("This trace uses a memory template (Allocations/Leaks).\n"
+               "Memory data cannot be exported via xctrace CLI.\n"
+               "Use: trace-memory.py summary -- <command>\n"
+               "Or:  trace-analyze.py info \"" + trace_path + "\"\n"
+               if self.trace_info.get('template', '') in ('Allocations', 'Leaks', 'Game Memory')
+               else "Check: trace-analyze.py info \"" + trace_path + "\"\n")
         )
 
     # -- xctrace subprocess ------------------------------------------------
@@ -1646,6 +1653,145 @@ def cmd_diff(args):
 
 
 # ---------------------------------------------------------------------------
+# Subcommand: info
+# ---------------------------------------------------------------------------
+
+def cmd_info(args):
+    """Show trace file contents and metadata."""
+    trace_path = args.trace
+    if not os.path.exists(trace_path):
+        raise FileNotFoundError(f"Trace file not found: {trace_path}")
+
+    # For sample output files
+    if os.path.isfile(trace_path) and _is_sample_file(trace_path):
+        sp = SampleOutputParser()
+        sp.parse_file(trace_path)
+        info = sp.trace_info
+        if args.json:
+            json.dump({'type': 'sample-output', **info}, sys.stdout, indent=2)
+            print()
+        else:
+            print(f"File: {trace_path}")
+            print(f"Type: macOS sample command output")
+            print(f"Process: {info.get('process_name', '?')} (PID {info.get('process_pid', '?')})")
+            print(f"Duration: {info.get('duration_s', 0):.1f}s")
+            print(f"Samples: {len(sp.samples)}")
+        return
+
+    # Parse TOC
+    toc_xml = TraceParser._run_xctrace(trace_path, toc=True)
+    root = ET.fromstring(toc_xml)
+
+    # Extract metadata
+    template = (root.findtext('.//summary/template-name') or 'Unknown').strip()
+    duration = root.findtext('.//summary/duration') or '0'
+    recording_mode = (root.findtext('.//summary/recording-mode') or '').strip()
+    start_date = (root.findtext('.//summary/start-date') or '').strip()
+    end_reason = (root.findtext('.//summary/end-reason') or '').strip()
+
+    proc_elem = root.find('.//target/process')
+    proc_name = proc_elem.get('name', '?') if proc_elem is not None else '?'
+    proc_pid = proc_elem.get('pid', '?') if proc_elem is not None else '?'
+
+    dev_elem = root.find('.//target/device')
+    dev_name = dev_elem.get('name', '?') if dev_elem is not None else '?'
+    dev_model = dev_elem.get('model', '') if dev_elem is not None else ''
+    os_ver = dev_elem.get('os-version', '') if dev_elem is not None else ''
+
+    # Collect data tables
+    tables = []
+    for tbl in root.findall('.//data/table'):
+        schema = tbl.get('schema', '')
+        codes = tbl.get('codes', '')
+        callstack = tbl.get('callstack', '')
+        doc = tbl.get('documentation', '')
+        tables.append({
+            'schema': schema,
+            'codes': codes.replace('"', ''),
+            'callstack': callstack,
+            'doc': doc[:60] if doc else '',
+        })
+
+    # Collect tracks
+    tracks = []
+    for track in root.findall('.//tracks/track'):
+        name = track.get('name', '')
+        details = [d.get('name', '') for d in track.findall('.//detail')]
+        tracks.append({'name': name, 'details': details})
+
+    # Detect template category
+    is_memory = template in ('Allocations', 'Leaks', 'Game Memory')
+    is_cpu = template in ('Time Profiler', 'CPU Profiler', 'Processor Trace', 'CPU Counters')
+    is_system = template in ('System Trace', 'Metal System Trace')
+
+    if args.json:
+        data = {
+            'trace_file': trace_path,
+            'template': template,
+            'duration_s': float(duration),
+            'recording_mode': recording_mode,
+            'process': proc_name,
+            'pid': proc_pid,
+            'device': dev_name,
+            'os_version': os_ver,
+            'tables': tables,
+            'tracks': [{'name': t['name'], 'details': t['details']} for t in tracks],
+            'category': 'memory' if is_memory else 'cpu' if is_cpu else 'system' if is_system else 'other',
+        }
+        json.dump(data, sys.stdout, indent=2)
+        print()
+        return
+
+    # Text output
+    print(f"Trace: {trace_path}")
+    print(f"Template: {template}")
+    print(f"Duration: {float(duration):.2f}s")
+    print(f"Process: {proc_name} (PID {proc_pid})")
+    if dev_model:
+        print(f"Device: {dev_model} \u2014 {dev_name} ({os_ver})")
+    if recording_mode:
+        print(f"Recording: {recording_mode}")
+    if end_reason:
+        print(f"End reason: {end_reason}")
+
+    # Data tables
+    if tables:
+        print()
+        print("Data Tables:")
+        print(f"  {'Schema':<28}  {'Codes':<16}  {'Callstack':<10}  Description")
+        print(f"  {'\u2500'*80}")
+        for t in tables:
+            codes_str = t['codes'][:16] if t['codes'] else ''
+            cs = t['callstack'] or ''
+            doc = t['doc'] or ''
+            print(f"  {t['schema']:<28}  {codes_str:<16}  {cs:<10}  {doc}")
+
+    # Tracks
+    if tracks:
+        print()
+        print("Tracks:")
+        for t in tracks:
+            details_str = ', '.join(t['details']) if t['details'] else 'none'
+            print(f"  {t['name']}: {details_str}")
+
+    # Hints
+    print()
+    if is_memory:
+        print("\u26a0  Allocations/Leaks track data cannot be exported via xctrace CLI.")
+        print("   Open in Instruments.app for full allocation details.")
+        print("   For CLI memory analysis: trace-memory.py summary -- <command>")
+        print("   For leak detection: trace-memory.py leaks -- <command>")
+    elif is_cpu:
+        print(f"Analyze: trace-analyze.py summary \"{trace_path}\"")
+        print(f"Visualize: trace-speedscope.sh \"{trace_path}\"")
+    elif is_system:
+        print("System Trace data is best viewed in Instruments.app.")
+        print(f"Some data may be exportable: trace-analyze.py info --json \"{trace_path}\"")
+    else:
+        print(f"Template '{template}' \u2014 check available data with --json.")
+
+
+# ---------------------------------------------------------------------------
 # CLI argument parser
 # ---------------------------------------------------------------------------
 
@@ -1659,7 +1805,9 @@ def main():
                '  trace-analyze.py calltree my.trace --depth 15 --min-pct 2\n'
                '  trace-analyze.py collapsed my.trace --with-module | flamegraph.pl > out.svg\n'
                '  trace-analyze.py flamegraph my.trace -o flame.svg --color-by module\n'
-               '  trace-analyze.py diff before.json after.json --threshold 0.5\n',
+               '  trace-analyze.py diff before.json after.json --threshold 0.5\n'
+               '  trace-analyze.py info my.trace\n'
+               '  trace-analyze.py info my.trace --json\n',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest='command')
@@ -1729,6 +1877,11 @@ def main():
     p_diff.add_argument('--threshold', type=float, default=1.0,
                         help='Change threshold in %% (default: 1.0)')
 
+    # -- info --------------------------------------------------------------
+    p_info = subparsers.add_parser('info', help='Show trace file contents and metadata')
+    p_info.add_argument('trace', help='Path to .trace file or sample output')
+    p_info.add_argument('--json', action='store_true', help='Output as JSON')
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1749,6 +1902,7 @@ def main():
         'collapsed': cmd_collapsed,
         'flamegraph': cmd_flamegraph,
         'diff': cmd_diff,
+        'info': cmd_info,
     }
 
     try:

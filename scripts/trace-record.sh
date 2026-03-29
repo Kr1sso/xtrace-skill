@@ -21,6 +21,8 @@ Options:
   --wait-timeout SECS     Max seconds to wait (default: 30)
   -a, --all               Trace all processes (system-wide)
   -e, --env KEY=VAL       Environment variable for launched process (repeatable)
+  --malloc-logging        Force MallocStackLogging for launched process
+  --no-malloc-logging     Disable MallocStackLogging even for memory templates
   --stdout                Forward target stdout to terminal
   --stderr                Forward target stderr to terminal
   -h, --help              Show this help
@@ -54,6 +56,7 @@ ALL_PROCS=false
 ENV_VARS=()
 FORWARD_STDOUT=false
 FORWARD_STDERR=false
+MALLOC_LOGGING=auto
 LAUNCH_CMD=()
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
@@ -77,6 +80,10 @@ while [[ $# -gt 0 ]]; do
             ALL_PROCS=true; shift ;;
         -e|--env)
             ENV_VARS+=("$2"); shift 2 ;;
+        --malloc-logging)
+            MALLOC_LOGGING=true; shift ;;
+        --no-malloc-logging)
+            MALLOC_LOGGING=false; shift ;;
         --stdout)
             FORWARD_STDOUT=true; shift ;;
         --stderr)
@@ -194,6 +201,21 @@ parse_duration() {
 }
 
 DURATION=$(parse_duration "$DURATION")
+
+# ── Auto-enable malloc logging for memory templates ──────────────────────────
+if [ "$MALLOC_LOGGING" = "auto" ]; then
+    case "$TEMPLATE" in
+        Allocations|Leaks|"Game Memory")
+            MALLOC_LOGGING=true ;;
+        *)
+            MALLOC_LOGGING=false ;;
+    esac
+fi
+
+if [ "$MALLOC_LOGGING" = true ] && [ ${#LAUNCH_CMD[@]} -gt 0 ]; then
+    ENV_VARS+=("MallocStackLogging=1")
+    echo "MallocStackLogging enabled for '$TEMPLATE' template" >&2
+fi
 
 # ── Resolve binary path (xctrace requires absolute paths) ───────────────────
 if [ ${#LAUNCH_CMD[@]} -gt 0 ]; then
@@ -335,10 +357,35 @@ fi
 ACTUAL_OUTPUT=$(cd "$(dirname "$ACTUAL_OUTPUT")" && echo "$(pwd)/$(basename "$ACTUAL_OUTPUT")")
 echo "$ACTUAL_OUTPUT"
 
+# ── Extract target PID ───────────────────────────────────────────────────────
+TARGET_PID=""
+PID_LINE=$(grep -i 'Launching process\|pid:' "$XCTRACE_OUTPUT_FILE" 2>/dev/null | head -1 || true)
+if [ -n "$PID_LINE" ]; then
+    TARGET_PID=$(echo "$PID_LINE" | grep -oE 'pid:?\s*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
+fi
+if [ -n "$PID" ]; then
+    TARGET_PID="$PID"
+fi
+
+# Write PID to sidecar file for downstream tools
+if [ -n "$TARGET_PID" ]; then
+    echo "$TARGET_PID" > "${ACTUAL_OUTPUT}.pid" 2>/dev/null || true
+fi
+
 # Print size info to stderr
 TRACE_SIZE=$(du -sh "$ACTUAL_OUTPUT" 2>/dev/null | cut -f1)
 echo "" >&2
 echo "Trace saved: $ACTUAL_OUTPUT ($TRACE_SIZE)" >&2
-echo "Analyze with: trace-analyze.py \"$ACTUAL_OUTPUT\"" >&2
+case "$TEMPLATE" in
+    Allocations|Leaks|"Game Memory")
+        echo "Analyze with: trace-memory.py summary -- <command>" >&2
+        echo "  Or attach: trace-memory.py summary -p <PID>" >&2
+        echo "  Leak check: trace-memory.py leaks -- <command>" >&2
+        echo "  Open in Instruments.app for full allocation details" >&2
+        ;;
+    *)
+        echo "Analyze with: trace-analyze.py \"$ACTUAL_OUTPUT\"" >&2
+        ;;
+esac
 
 exit 0
