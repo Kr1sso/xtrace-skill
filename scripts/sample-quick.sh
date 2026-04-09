@@ -134,8 +134,19 @@ else
     fi
 fi
 
+# ── Acquire sudo if target is root-owned ────────────────────────────────────
+SUDO_PREFIX=()
+HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sudo-askpass.sh"
+if [ -f "$HELPER" ] && [ -n "$TARGET" ]; then
+    source "$HELPER"
+    if process_needs_sudo "$TARGET"; then
+        ensure_sudo_if_needed "$TARGET"
+        SUDO_PREFIX=(sudo)
+    fi
+fi
+
 # ── Validate PID is running ─────────────────────────────────────────────────
-if ! kill -0 "$TARGET" 2>/dev/null; then
+if ! "${SUDO_PREFIX[@]}" kill -0 "$TARGET" 2>/dev/null; then
     echo "Error: PID $TARGET is not running or not accessible" >&2
     echo "  You may need to run with sudo for processes owned by other users." >&2
     exit 1
@@ -143,7 +154,7 @@ fi
 
 # Get the process name for display if we don't have it yet
 if [ -z "$PROC_NAME" ]; then
-    PROC_NAME=$(ps -p "$TARGET" -o comm= 2>/dev/null | xargs basename 2>/dev/null || echo "pid$TARGET")
+    PROC_NAME=$("${SUDO_PREFIX[@]}" ps -p "$TARGET" -o comm= 2>/dev/null | xargs basename 2>/dev/null || echo "pid$TARGET")
 fi
 
 # ── Generate output filename ────────────────────────────────────────────────
@@ -159,7 +170,7 @@ echo "Output: $OUTPUT" >&2
 echo "" >&2
 
 set +e
-sample "$TARGET" "$DURATION" "$INTERVAL" -file "$OUTPUT" -mayDie 2>&1 | \
+"${SUDO_PREFIX[@]}" sample "$TARGET" "$DURATION" "$INTERVAL" -file "$OUTPUT" -mayDie 2>&1 | \
     grep -v "^$" >&2
 SAMPLE_EXIT=${PIPESTATUS[0]}
 set -e

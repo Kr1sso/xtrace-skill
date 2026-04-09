@@ -84,6 +84,37 @@ trap 'rm -f "$TMPFILE"' EXIT
 echo "Exporting collapsed stacks..." >&2
 python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_FILE" "${FILTER_ARGS[@]}" > "$TMPFILE"
 
+# C++ template symbols can produce multi-KB frame names that choke speedscope.
+# If the collapsed file is large, shorten frame names automatically.
+FILE_SIZE=$(wc -c < "$TMPFILE" | tr -d ' ')
+MAX_FRAME=120
+if [ "$FILE_SIZE" -gt 2000000 ]; then  # > 2MB
+    echo "Large collapsed stacks ($(( FILE_SIZE / 1024 ))KB) — shortening C++ symbols..." >&2
+    SHORTENED=$(mktemp /tmp/trace_shortened_XXXXXX.txt)
+    python3 -c "
+import sys
+for line in open('$TMPFILE'):
+    parts = line.rstrip().rsplit(' ', 1)
+    if len(parts) != 2: continue
+    frames, count = parts
+    short = []
+    for f in frames.split(';'):
+        f = (f.replace('std::__1::', '')
+              .replace('[abi:nqe210106]', '')
+              .replace('stdext::', 'sx::')
+              .replace('microsoft::', 'ms::')
+              .replace('boost::context::detail::', 'bctx::')
+              .replace('sense::', 's::'))
+        if len(f) > $MAX_FRAME:
+            f = f[:$((MAX_FRAME - 3))] + '...'
+        short.append(f)
+    print(';'.join(short) + ' ' + count)
+" > "$SHORTENED"
+    mv "$SHORTENED" "$TMPFILE"
+    NEW_SIZE=$(wc -c < "$TMPFILE" | tr -d ' ')
+    echo "Shortened to $(( NEW_SIZE / 1024 ))KB" >&2
+fi
+
 STACK_COUNT=$(wc -l < "$TMPFILE" | tr -d ' ')
 echo "Opening speedscope with $STACK_COUNT unique stacks..." >&2
 speedscope "$TMPFILE"

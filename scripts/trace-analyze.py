@@ -480,8 +480,27 @@ class TraceParser:
             cmd.extend(['--xpath', xpath])
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
+            # Check if it's a permissions issue on the trace files
+            stderr = result.stderr.strip()
+            if 'not readable' in stderr or 'Permission denied' in stderr or result.returncode == 43:
+                # Try to fix permissions via sudo askpass dialog
+                script_dir = os.path.dirname(os.path.realpath(__file__))
+                askpass = os.path.join(script_dir, 'sudo-askpass.sh')
+                if os.path.exists(askpass):
+                    import sys
+                    print("Trace file has restricted permissions (likely recorded as root).", file=sys.stderr)
+                    print("Requesting sudo to fix permissions...", file=sys.stderr)
+                    fix = subprocess.run(
+                        ['bash', '-c', f'source "{askpass}" && acquire_sudo && sudo chmod -R a+r "{trace_path}" && sudo chown -R "$(whoami)" "{trace_path}"'],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    if fix.returncode == 0:
+                        # Retry the export
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                        if result.returncode == 0:
+                            return result.stdout
             raise RuntimeError(
-                f"xctrace export failed (exit {result.returncode}):\n{result.stderr.strip()}"
+                f"xctrace export failed (exit {result.returncode}):\n{stderr}"
             )
         return result.stdout
 

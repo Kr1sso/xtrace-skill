@@ -293,6 +293,32 @@ echo "Command: ${CMD[*]}" >&2
 echo "" >&2
 
 # ── Execute ──────────────────────────────────────────────────────────────────
+# If attaching to a root-owned process, acquire sudo via GUI dialog
+SUDO_PREFIX=()
+if [ -n "$PID" ]; then
+    HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sudo-askpass.sh"
+    if [ -f "$HELPER" ]; then
+        source "$HELPER"
+        if process_needs_sudo "$PID"; then
+            ensure_sudo_if_needed "$PID"
+            SUDO_PREFIX=(sudo)
+        fi
+    fi
+elif [ -n "$NAME" ]; then
+    # Resolve name to PID to check ownership
+    RESOLVED_PID=$(pgrep -x "$NAME" 2>/dev/null | head -1 || true)
+    if [ -n "$RESOLVED_PID" ]; then
+        HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sudo-askpass.sh"
+        if [ -f "$HELPER" ]; then
+            source "$HELPER"
+            if process_needs_sudo "$RESOLVED_PID"; then
+                ensure_sudo_if_needed "$RESOLVED_PID"
+                SUDO_PREFIX=(sudo)
+            fi
+        fi
+    fi
+fi
+
 # Capture xctrace output to parse for the actual output path
 XCTRACE_OUTPUT_FILE=$(mktemp)
 
@@ -309,7 +335,7 @@ _cleanup() {
 trap _cleanup EXIT INT TERM
 
 set +e
-"${CMD[@]}" 2>&1 | tee "$XCTRACE_OUTPUT_FILE" >&2
+"${SUDO_PREFIX[@]}" "${CMD[@]}" 2>&1 | tee "$XCTRACE_OUTPUT_FILE" >&2
 EXIT_CODE=${PIPESTATUS[0]}
 set -e
 

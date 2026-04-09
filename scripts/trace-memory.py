@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Constants
 # ---------------------------------------------------------------------------
 
-TIMEOUT_SECS = 30
+TIMEOUT_SECS = 120
 LAUNCH_SETTLE_SECS = 0.5
 
 # ---------------------------------------------------------------------------
@@ -186,11 +186,53 @@ def _resolve_target(args) -> Tuple[int, str, Optional[subprocess.Popen]]:
 # Command runners
 # ---------------------------------------------------------------------------
 
+def _get_sudo_prefix_if_needed(pid: int) -> list:
+    """Check if a process is owned by another user and acquire sudo if needed.
+    Returns ['sudo'] or [] depending on whether sudo is required.
+    Uses SUDO_ASKPASS with a macOS dialog for non-interactive environments."""
+    try:
+        r = subprocess.run(['ps', '-o', 'user=', '-p', str(pid)],
+                           capture_output=True, text=True, timeout=5)
+        owner = r.stdout.strip()
+        import getpass
+        if owner and owner != getpass.getuser():
+            # Need sudo — check if already primed
+            check = subprocess.run(['sudo', '-n', 'true'], capture_output=True, timeout=5)
+            if check.returncode == 0:
+                return ['sudo']
+            
+            # Not primed — use SUDO_ASKPASS with macOS dialog helper
+            script_dir = os.path.dirname(os.path.realpath(__file__))
+            askpass_helper = os.path.join(script_dir, 'sudo-askpass-helper.sh')
+            if os.path.exists(askpass_helper):
+                print(f"Process {pid} is owned by '{owner}' — sudo required.", file=sys.stderr)
+                print("Requesting via password dialog...", file=sys.stderr)
+                env = os.environ.copy()
+                env['SUDO_ASKPASS'] = askpass_helper
+                acq = subprocess.run(
+                    ['sudo', '-A', 'true'],
+                    env=env, capture_output=True, timeout=30
+                )
+                if acq.returncode == 0:
+                    print("Sudo acquired.", file=sys.stderr)
+                    # Now sudo is primed for this user — subsequent sudo calls work
+                    return ['sudo']
+                else:
+                    print("Warning: Could not acquire sudo.", file=sys.stderr)
+                    return []
+            else:
+                print(f"Process {pid} is owned by '{owner}' — run with sudo.", file=sys.stderr)
+                return []
+    except Exception:
+        pass
+    return []
+
 def run_vmmap_summary(pid: int) -> str:
     """Run vmmap --summary and return stdout."""
+    sudo_prefix = _get_sudo_prefix_if_needed(pid)
     try:
         r = subprocess.run(
-            ['vmmap', '--summary', str(pid)],
+            [*sudo_prefix, 'vmmap', '--summary', str(pid)],
             capture_output=True, text=True, timeout=TIMEOUT_SECS,
         )
     except FileNotFoundError:
@@ -213,9 +255,10 @@ def run_vmmap_summary(pid: int) -> str:
 
 def run_heap(pid: int) -> str:
     """Run heap and return stdout."""
+    sudo_prefix = _get_sudo_prefix_if_needed(pid)
     try:
         r = subprocess.run(
-            ['heap', str(pid)],
+            [*sudo_prefix, 'heap', str(pid)],
             capture_output=True, text=True, timeout=TIMEOUT_SECS,
         )
     except FileNotFoundError:
@@ -235,10 +278,11 @@ def run_heap(pid: int) -> str:
 
 
 def run_leaks(pid: int) -> str:
-    """Run leaks and return stdout."""
+    """Run leaks and return stdout. Auto-acquires sudo for root-owned processes."""
+    sudo_prefix = _get_sudo_prefix_if_needed(pid)
     try:
         r = subprocess.run(
-            ['leaks', str(pid)],
+            [*sudo_prefix, 'leaks', str(pid)],
             capture_output=True, text=True, timeout=TIMEOUT_SECS,
         )
     except FileNotFoundError:
@@ -251,8 +295,8 @@ def run_leaks(pid: int) -> str:
     # Only treat it as error if stderr has actual errors
     if r.returncode != 0 and r.returncode != 1:
         stderr = r.stderr.strip()
-        if 'permission' in stderr.lower() or 'not permitted' in stderr.lower():
-            print(f"Error: Permission denied. Try: sudo trace-memory.py ...", file=sys.stderr)
+        if 'permission' in stderr.lower() or 'not permitted' in stderr.lower() or 'not valid' in stderr.lower() or 'privilege' in stderr.lower():
+            print(f"Error: leaks failed (exit {r.returncode}): {stderr}", file=sys.stderr)
         else:
             print(f"Error: leaks failed (exit {r.returncode}): {stderr}", file=sys.stderr)
         sys.exit(1)
