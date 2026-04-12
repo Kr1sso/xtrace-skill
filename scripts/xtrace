@@ -1,7 +1,7 @@
 #!/bin/bash
 # xtrace — Profile any command. Works like `time` — just prefix your command.
 #
-# Records a trace, prints summary to stderr, outputs trace path to stdout.
+# Records an Instruments trace, prints summaries to stderr, outputs trace path to stdout.
 # Pipe the path to any analysis tool.
 #
 # Usage:
@@ -26,16 +26,19 @@ Usage: xtrace [options] command [args...]
 
 Profile any command. Like `time`, just prefix your command.
 
-Records a Time Profiler trace, prints a summary to stderr,
+Records an Instruments trace (Time Profiler by default), prints summaries to stderr,
 and outputs the trace file path to stdout for piping.
 
 Options:
-  -d DURATION     Recording duration: 10, 10s, 2.5s, 500ms (default: 30s, or until exit)
-  -t TEMPLATE     Instruments template (default: 'Time Profiler')
-  -o PATH         Output .trace path (default: auto in /tmp)
-  --no-summary    Skip auto-summary, just output trace path
-  --top N         Number of functions in summary (default: 15)
-  -h, --help      Show this help
+  -d DURATION       Recording duration: 10, 10s, 2.5s, 500ms (default: 30s, or until exit)
+  -t TEMPLATE       Instruments template (default: 'Time Profiler')
+  --gpu             Shorthand for '-t "Metal System Trace"' + GPU summary
+  --cpu             Shorthand for '-t "Time Profiler"'
+  --gpu-process STR Optional process filter override for GPU summary
+  -o PATH           Output .trace path (default: auto in /tmp)
+  --no-summary      Skip auto-summary, just output trace path
+  --top N           Number of functions in CPU summary (default: 15)
+  -h, --help        Show this help
 
 Pipe to other tools:
   xtrace ./app | trace-flamegraph -          # flamegraph
@@ -46,7 +49,11 @@ Pipe to other tools:
 
 Memory profiling:
   xtrace -t Allocations ./app         # memory summary + trace
-  xtrace -t Leaks ./app                # leak detection + trace
+  xtrace -t Leaks ./app               # leak detection + trace
+
+GPU profiling:
+  xtrace --gpu ./app                  # Metal System Trace + GPU summary
+  xtrace --gpu --gpu-process myapp ./app
 
 EOF
     exit "${1:-1}"
@@ -57,11 +64,15 @@ TEMPLATE="Time Profiler"
 OUTPUT=""
 SUMMARIZE=true
 TOP=15
+GPU_PROCESS_FILTER=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d)            DURATION="$2"; shift 2 ;;
         -t)            TEMPLATE="$2"; shift 2 ;;
+        --gpu)         TEMPLATE="Metal System Trace"; shift ;;
+        --cpu)         TEMPLATE="Time Profiler"; shift ;;
+        --gpu-process) GPU_PROCESS_FILTER="$2"; shift 2 ;;
         -o)            OUTPUT="$2"; shift 2 ;;
         --no-summary)  SUMMARIZE=false; shift ;;
         --top)         TOP="$2"; shift 2 ;;
@@ -90,6 +101,13 @@ fi
 _is_memory_template() {
     case "$1" in
         Allocations|Leaks|"Game Memory") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_is_gpu_template() {
+    case "$1" in
+        "Metal System Trace") return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -168,74 +186,93 @@ FINAL_PATH="$TRACE_PATH"
 
 # Auto-summarize to stderr (and detect empty traces for fallback)
 if [ "$SUMMARIZE" = true ]; then
-    echo "" >&2
-    set +e
-    python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top "$TOP" >&2 2>&1
-    SUMMARY_EXIT=$?
-    set -e
-
-    if [ "$SUMMARY_EXIT" -ne 0 ]; then
+    if _is_gpu_template "$TEMPLATE"; then
         echo "" >&2
-        echo "⚠  No CPU samples in trace — Time Profiler only captures running threads." >&2
-        echo "   (GPU-bound, I/O-bound, or blocked workloads produce empty traces.)" >&2
-        echo "   Falling back to macOS sample command (captures all thread states)..." >&2
-        echo "" >&2
-
-        # Re-run the command under sample-quick.sh
-        # Convert duration to seconds for sample
-        SAMPLE_SECS=30
-        if [[ "$DURATION" =~ ^([0-9]+)(s|ms|m)?$ ]]; then
-            _NUM="${BASH_REMATCH[1]}"
-            _UNIT="${BASH_REMATCH[2]}"
-            case "$_UNIT" in
-                s|"") SAMPLE_SECS=$_NUM ;;
-                ms)   SAMPLE_SECS=$(( (_NUM + 999) / 1000 )) ;;
-                m)    SAMPLE_SECS=$(( _NUM * 60 )) ;;
-            esac
+        if [ -n "$GPU_PROCESS_FILTER" ]; then
+            python3 "$SCRIPT_DIR/trace-gpu.py" "$TRACE_PATH" --process "$GPU_PROCESS_FILTER" >&2 || true
+        else
+            python3 "$SCRIPT_DIR/trace-gpu.py" "$TRACE_PATH" >&2 || true
         fi
 
+        # Also show CPU-side hotspots from the embedded time-profile table when available.
+        echo "" >&2
         set +e
-        SAMPLE_PATH=$("$SCRIPT_DIR/sample-quick.sh" --launch -d "$SAMPLE_SECS" -- "${CMD[@]}")
-        SAMPLE_EXIT=$?
+        python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top "$TOP" >&2 2>&1
+        set -e
+    else
+        echo "" >&2
+        set +e
+        python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top "$TOP" >&2 2>&1
+        SUMMARY_EXIT=$?
         set -e
 
-        if [ "$SAMPLE_EXIT" -eq 0 ] && [ -n "$SAMPLE_PATH" ] && [ -f "$SAMPLE_PATH" ]; then
-            FINAL_PATH="$SAMPLE_PATH"
+        if [ "$SUMMARY_EXIT" -ne 0 ]; then
             echo "" >&2
-            python3 "$SCRIPT_DIR/trace-analyze.py" summary "$SAMPLE_PATH" --top "$TOP" >&2 || true
-        else
-            echo "   Fallback also failed. The empty trace may still be viewable in Instruments.app." >&2
+            echo "⚠  No CPU samples in trace — Time Profiler only captures running threads." >&2
+            echo "   (GPU-bound, I/O-bound, or blocked workloads produce empty traces.)" >&2
+            echo "   Falling back to macOS sample command (captures all thread states)..." >&2
+            echo "" >&2
+
+            # Re-run the command under sample-quick.sh
+            # Convert duration to seconds for sample
+            SAMPLE_SECS=30
+            if [[ "$DURATION" =~ ^([0-9]+)(s|ms|m)?$ ]]; then
+                _NUM="${BASH_REMATCH[1]}"
+                _UNIT="${BASH_REMATCH[2]}"
+                case "$_UNIT" in
+                    s|"") SAMPLE_SECS=$_NUM ;;
+                    ms)   SAMPLE_SECS=$(( (_NUM + 999) / 1000 )) ;;
+                    m)    SAMPLE_SECS=$(( _NUM * 60 )) ;;
+                esac
+            fi
+
+            set +e
+            SAMPLE_PATH=$("$SCRIPT_DIR/sample-quick.sh" --launch -d "$SAMPLE_SECS" -- "${CMD[@]}")
+            SAMPLE_EXIT=$?
+            set -e
+
+            if [ "$SAMPLE_EXIT" -eq 0 ] && [ -n "$SAMPLE_PATH" ] && [ -f "$SAMPLE_PATH" ]; then
+                FINAL_PATH="$SAMPLE_PATH"
+                echo "" >&2
+                python3 "$SCRIPT_DIR/trace-analyze.py" summary "$SAMPLE_PATH" --top "$TOP" >&2 || true
+            else
+                echo "   Fallback also failed. The empty trace may still be viewable in Instruments.app." >&2
+            fi
         fi
     fi
 else
-    # With --no-summary, do a quick silent check and warn if empty
-    set +e
-    python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top 1 --json >/dev/null 2>&1
-    CHECK_EXIT=$?
-    set -e
-
-    if [ "$CHECK_EXIT" -ne 0 ]; then
-        echo "⚠  Trace appears empty (no CPU samples — workload likely GPU/IO-bound)." >&2
-        echo "   Falling back to macOS sample command..." >&2
-
-        SAMPLE_SECS=30
-        if [[ "$DURATION" =~ ^([0-9]+)(s|ms|m)?$ ]]; then
-            _NUM="${BASH_REMATCH[1]}"
-            _UNIT="${BASH_REMATCH[2]}"
-            case "$_UNIT" in
-                s|"") SAMPLE_SECS=$_NUM ;;
-                ms)   SAMPLE_SECS=$(( (_NUM + 999) / 1000 )) ;;
-                m)    SAMPLE_SECS=$(( _NUM * 60 )) ;;
-            esac
-        fi
-
+    # With --no-summary, do a quick silent check and warn if empty.
+    # For GPU templates we intentionally skip CPU-empty fallback because
+    # Metal traces can be valid even with sparse CPU samples.
+    if ! _is_gpu_template "$TEMPLATE"; then
         set +e
-        SAMPLE_PATH=$("$SCRIPT_DIR/sample-quick.sh" --launch -d "$SAMPLE_SECS" -- "${CMD[@]}")
-        SAMPLE_EXIT=$?
+        python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top 1 --json >/dev/null 2>&1
+        CHECK_EXIT=$?
         set -e
 
-        if [ "$SAMPLE_EXIT" -eq 0 ] && [ -n "$SAMPLE_PATH" ] && [ -f "$SAMPLE_PATH" ]; then
-            FINAL_PATH="$SAMPLE_PATH"
+        if [ "$CHECK_EXIT" -ne 0 ]; then
+            echo "⚠  Trace appears empty (no CPU samples — workload likely GPU/IO-bound)." >&2
+            echo "   Falling back to macOS sample command..." >&2
+
+            SAMPLE_SECS=30
+            if [[ "$DURATION" =~ ^([0-9]+)(s|ms|m)?$ ]]; then
+                _NUM="${BASH_REMATCH[1]}"
+                _UNIT="${BASH_REMATCH[2]}"
+                case "$_UNIT" in
+                    s|"") SAMPLE_SECS=$_NUM ;;
+                    ms)   SAMPLE_SECS=$(( (_NUM + 999) / 1000 )) ;;
+                    m)    SAMPLE_SECS=$(( _NUM * 60 )) ;;
+                esac
+            fi
+
+            set +e
+            SAMPLE_PATH=$("$SCRIPT_DIR/sample-quick.sh" --launch -d "$SAMPLE_SECS" -- "${CMD[@]}")
+            SAMPLE_EXIT=$?
+            set -e
+
+            if [ "$SAMPLE_EXIT" -eq 0 ] && [ -n "$SAMPLE_PATH" ] && [ -f "$SAMPLE_PATH" ]; then
+                FINAL_PATH="$SAMPLE_PATH"
+            fi
         fi
     fi
 fi

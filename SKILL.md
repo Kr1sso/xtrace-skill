@@ -1,6 +1,6 @@
 ---
 name: instruments
-description: "Profile macOS applications using Instruments/xctrace. Record CPU traces, analyze hotspots, generate flamegraphs, compare profiles, drill into time windows. Detect memory leaks, track memory growth, analyze heap allocations."
+description: "Profile macOS applications using Instruments/xctrace. Record CPU and GPU traces, analyze hotspots and GPU utilization, generate flamegraphs, compare profiles, drill into time windows. Detect memory leaks, track memory growth, analyze heap allocations."
 ---
 
 # Instruments Profiling Skill
@@ -11,23 +11,29 @@ Unix-style profiling for macOS. Composable tools that pipe together.
 
 ```bash
 # CPU profiling
-xtrace ./my_app                                    # record + print summary
+xtrace ./my_app                                    # record + print CPU summary
+xtrace --cpu ./my_app                              # explicit CPU template
 xtrace ./my_app | trace-speedscope -               # → interactive analysis (best)
+
+# GPU profiling (Metal System Trace)
+xtrace --gpu ./my_app                              # GPU summary + CPU hotspot summary
+xtrace --gpu --gpu-process my_app ./launcher       # override process filter when launcher name differs
 
 # Memory analysis
 trace-memory.py summary -- ./my_app                # memory overview
-trace-memory.py leaks -- ./my_app                   # detect leaks
-trace-memory.py growth -d 30 -- ./my_app            # track growth over time
-xtrace -t Allocations ./my_app                      # Instruments trace + memory summary
+trace-memory.py leaks -- ./my_app                  # detect leaks
+trace-memory.py growth -d 30 -- ./my_app           # track growth over time
+xtrace -t Allocations ./my_app                     # Instruments trace + memory summary
 ```
 
 ## Scripts
 
 | Script | Purpose |
 |---|---|
-| **`xtrace`** | Record + summarize. Prefix any command. Auto-detects template type. |
+| **`xtrace`** | Record + summarize. Prefix any command. Supports CPU (`--cpu`) and GPU (`--gpu`) flows. |
 | `trace-record.sh` | Record with full control (attach, wait-for, system-wide, templates) |
 | `trace-analyze.py` | CPU analysis: summary, timeline, calltree, collapsed, diff, info |
+| **`trace-gpu.py`** | **GPU analysis for Metal System Trace: active/idle ratios, command-buffer cadence, process ownership** |
 | **`trace-memory.py`** | **Memory analysis: summary, leaks, growth, regions, heap** |
 | `trace-speedscope.sh` | Interactive visualization (speedscope web UI) |
 | `trace-flamegraph.sh` | Generate SVG flamegraph file |
@@ -117,6 +123,36 @@ trace-flamegraph.sh recording.trace -o profile.svg   # SVG file
 trace-diff-flamegraph.sh before.trace after.trace -o diff.svg
 ```
 
+## GPU Profiling (Metal)
+
+### Quick GPU Loop
+
+```bash
+# One-command GPU profiling (Metal System Trace)
+xtrace --gpu -d 10 ./my_app --benchmark
+
+# Record now, analyze later
+TRACE=$(xtrace --gpu --no-summary -d 10 ./my_app)
+trace-gpu.py "$TRACE"                                # human summary
+trace-gpu.py "$TRACE" --json > gpu_report.json      # machine-readable
+
+# Launcher process differs from worker process name
+xtrace --gpu --gpu-process my_worker ./launcher
+```
+
+### Deep GPU + CPU Correlation
+
+```bash
+trace-record.sh -t 'Metal System Trace' -d 10 -- ./my_app
+trace-gpu.py recording.trace
+trace-analyze.py summary recording.trace --top 20
+```
+
+`trace-gpu.py` reports:
+- **GPU state utilization**: Active vs Idle ratios
+- **Metal app intervals**: command-buffer count + duration distribution (avg/median/p95)
+- **GPU ownership**: target process share vs competing processes (WindowServer, browser GPU helpers, etc.)
+
 ## Memory Analysis
 
 ### Quick Memory Check
@@ -194,6 +230,7 @@ trace-memory.py growth -d 20 --json -- ./my_app > growth.json
 | Template | When | Tool | Resolution |
 |---|---|---|---|
 | **Time Profiler** | General CPU profiling (default) | trace-analyze.py | 1ms sampling |
+| **Metal System Trace** | GPU utilization, command-buffer cadence, CPU/GPU correlation | **trace-gpu.py** + trace-analyze.py | Event intervals |
 | System Trace | Thread contention, syscalls | Instruments.app | Microsecond |
 | Processor Trace | Every function call | trace-analyze.py | Every branch |
 | CPU Counters | IPC, cache misses | Instruments.app | Per-event |
@@ -223,11 +260,18 @@ trace-memory.py growth -d 20 --json -- ./my_app > growth.json
 
 ## GPU/IO-Bound Workloads
 
-`xtrace` automatically handles GPU/IO-bound workloads — falls back to `sample` if Time Profiler returns no data.
+- In **CPU mode** (`Time Profiler`), `xtrace` auto-falls back to `sample` if CPU samples are empty.
+- In **GPU mode** (`--gpu` / `Metal System Trace`), `xtrace` keeps the Metal trace and runs `trace-gpu.py` summary (no sample fallback).
 
 ```bash
-xtrace ./build/gpu_app --benchmark      # auto-fallback
-sample-quick.sh --launch -d 10 -- ./build/gpu_app  # direct sample
+# CPU mode with automatic sample fallback when needed
+xtrace ./build/gpu_app --benchmark
+
+# Explicit GPU trace mode
+xtrace --gpu ./build/gpu_app --benchmark
+
+# Direct sample usage
+sample-quick.sh --launch -d 10 -- ./build/gpu_app
 ```
 
 ## Troubleshooting
@@ -235,8 +279,9 @@ sample-quick.sh --launch -d 10 -- ./build/gpu_app  # direct sample
 | Problem | Fix |
 |---|---|
 | `xctrace not found` | `xcode-select --install` |
-| No samples | `xtrace` auto-falls back to `sample` |
+| No CPU samples in Time Profiler | `xtrace` auto-falls back to `sample` in CPU mode |
 | Unsymbolicated frames | Rebuild with `-g` |
+| Missing GPU rows in `trace-gpu.py` | Ensure template is `Metal System Trace` (`xtrace --gpu ...`) |
 | Allocations trace empty in CLI | Normal — use `trace-memory.py` or open in Instruments.app |
 | `leaks` needs backtraces | Launch with `MallocStackLogging=1` (automatic in trace-memory.py) |
 | Permission denied for vmmap | Run with `sudo` or profile your own processes |

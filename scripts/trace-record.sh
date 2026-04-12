@@ -58,6 +58,7 @@ FORWARD_STDOUT=false
 FORWARD_STDERR=false
 MALLOC_LOGGING=auto
 LAUNCH_CMD=()
+SUDO_PREFIX=()
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -335,7 +336,11 @@ _cleanup() {
 trap _cleanup EXIT INT TERM
 
 set +e
-"${SUDO_PREFIX[@]}" "${CMD[@]}" 2>&1 | tee "$XCTRACE_OUTPUT_FILE" >&2
+if [ ${#SUDO_PREFIX[@]} -gt 0 ]; then
+    "${SUDO_PREFIX[@]}" "${CMD[@]}" 2>&1 | tee "$XCTRACE_OUTPUT_FILE" >&2
+else
+    "${CMD[@]}" 2>&1 | tee "$XCTRACE_OUTPUT_FILE" >&2
+fi
 EXIT_CODE=${PIPESTATUS[0]}
 set -e
 

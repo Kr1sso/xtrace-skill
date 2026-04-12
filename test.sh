@@ -6,14 +6,18 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/scripts" && pwd)"
 PASS=0
 FAIL=0
+SKIP=0
 ERRORS=""
 TRACE_FILE=""
 TRACE_FILE_2=""
 CLEANUP_FILES=()
+HAS_INFERNO=false
+HAS_METAL_TEMPLATE=false
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 pass() { ((PASS++)); echo "  ✓ $1"; }
 fail() { ((FAIL++)); ERRORS+="  ✗ $1\n"; echo "  ✗ $1"; }
+skip() { ((SKIP++)); echo "  ↷ $1"; }
 
 check() {
     local desc="$1"; shift
@@ -25,7 +29,7 @@ check_output() {
     local desc="$1" expected="$2"; shift 2
     local output
     output=$("$@" 2>&1) || true
-    if echo "$output" | grep -q "$expected"; then pass "$desc"
+    if echo "$output" | grep -q -- "$expected"; then pass "$desc"
     else fail "$desc — expected '$expected'"; fi
 }
 
@@ -33,7 +37,7 @@ check_output_not() {
     local desc="$1" unexpected="$2"; shift 2
     local output
     output=$("$@" 2>&1) || true
-    if echo "$output" | grep -q "$unexpected"; then fail "$desc — found '$unexpected'"
+    if echo "$output" | grep -q -- "$unexpected"; then fail "$desc — found '$unexpected'"
     else pass "$desc"; fi
 }
 
@@ -63,7 +67,7 @@ tmpfile() {
 }
 
 cleanup() {
-    for f in "${CLEANUP_FILES[@]}"; do rm -f "$f" 2>/dev/null; done
+    for f in "${CLEANUP_FILES[@]}"; do rm -rf "$f" 2>/dev/null; done
     rm -rf "$TRACE_FILE" "$TRACE_FILE_2" 2>/dev/null
 }
 trap cleanup EXIT
@@ -75,9 +79,24 @@ echo "━━━ 1. Prerequisites ━━━"
 check "xctrace available" command -v xctrace
 check "python3 available" command -v python3
 check "python3 >= 3.8" python3 -c "import sys; assert sys.version_info >= (3, 8)"
-check "inferno available" command -v inferno-flamegraph
+
+if command -v inferno-flamegraph >/dev/null 2>&1 && command -v inferno-diff-folded >/dev/null 2>&1 && command -v inferno-collapse-xctrace >/dev/null 2>&1; then
+    HAS_INFERNO=true
+    pass "inferno tools available"
+else
+    skip "inferno tools not available (inferno-specific tests will be skipped)"
+fi
+
 check "speedscope available" command -v speedscope
 check "trace-analyze.py compiles" python3 -m py_compile "$SCRIPT_DIR/trace-analyze.py"
+check "trace-gpu.py compiles" python3 -m py_compile "$SCRIPT_DIR/trace-gpu.py"
+
+if command -v xctrace >/dev/null 2>&1 && xctrace list templates 2>/dev/null | grep -F "Metal System Trace" >/dev/null; then
+    HAS_METAL_TEMPLATE=true
+    pass "Metal System Trace template available"
+else
+    skip "Metal System Trace template unavailable (GPU recording test skipped)"
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -85,6 +104,8 @@ echo "━━━ 2. Help text (every script, every subcommand) ━━━"
 # ══════════════════════════════════════════════════════════════════════════════
 
 check_output "xtrace --help" "Usage:" bash "$SCRIPT_DIR/xtrace" --help
+check_output "xtrace --help mentions --gpu" "--gpu" bash "$SCRIPT_DIR/xtrace" --help
+check_output "xtrace --help mentions --gpu-process" "gpu-process" bash "$SCRIPT_DIR/xtrace" --help
 check_output "xtrace -h" "Usage:" bash "$SCRIPT_DIR/xtrace" -h
 check_output "trace-record.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-record.sh" --help
 check_output "trace-record.sh --help mentions --wait-for" "wait-for" bash "$SCRIPT_DIR/trace-record.sh" --help
@@ -95,13 +116,118 @@ check_output "trace-speedscope.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-speed
 check_output "trace-diff-flamegraph.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" --help
 check_output_not "trace-diff-flamegraph.sh --help no --open" "\-\-open" bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" --help
 check_output "sample-quick.sh --help" "Usage:" bash "$SCRIPT_DIR/sample-quick.sh" --help
+check_output "trace-gpu.py --help" "Analyze GPU-centric metrics" python3 "$SCRIPT_DIR/trace-gpu.py" --help
 check_output "trace-check.sh runs" "xctrace" bash "$SCRIPT_DIR/trace-check.sh"
 
 # trace-analyze.py subcommands
 check_output "trace-analyze.py --help" "summary" python3 "$SCRIPT_DIR/trace-analyze.py" --help
-for sub in summary timeline calltree collapsed flamegraph diff; do
+for sub in summary timeline calltree collapsed flamegraph diff info; do
     check_output "trace-analyze.py $sub --help" "trace" python3 "$SCRIPT_DIR/trace-analyze.py" "$sub" --help
 done
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 2b. GPU analysis (mocked xctrace) ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
+
+MOCK_XCTRACE_DIR=$(mktemp -d "/tmp/xtrace_mock_xctrace_XXXXXXXX")
+CLEANUP_FILES+=("$MOCK_XCTRACE_DIR")
+MOCK_XCTRACE="$MOCK_XCTRACE_DIR/xctrace"
+
+cat > "$MOCK_XCTRACE" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+MODE=""
+XPATH=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        export) shift ;;
+        --toc) MODE="toc"; shift ;;
+        --xpath) MODE="xpath"; XPATH="$2"; shift 2 ;;
+        --input) shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+if [ "$MODE" = "toc" ]; then
+    cat <<'XML'
+<trace-toc>
+  <run number="1">
+    <target>
+      <process type="launched" name="MyGame" pid="4242"/>
+    </target>
+  </run>
+</trace-toc>
+XML
+    exit 0
+fi
+
+case "$XPATH" in
+  *metal-gpu-state-intervals*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><duration>1000000000</duration><gpu-state fmt="Active">Active</gpu-state></row>
+    <row><duration>500000000</duration><gpu-state fmt="Idle">Idle</gpu-state></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *metal-application-intervals*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><duration>200000000</duration><process fmt="MyGame (4242)"/><metal-nesting-level fmt="1">1</metal-nesting-level><formatted-label fmt="Command Buffer #1">Command Buffer #1</formatted-label></row>
+    <row><duration>300000000</duration><process fmt="MyGame (4242)"/><metal-nesting-level fmt="1">1</metal-nesting-level><formatted-label fmt="Command Buffer #2">Command Buffer #2</formatted-label></row>
+    <row><duration>100000000</duration><process fmt="WindowServer (100)"/><metal-nesting-level fmt="1">1</metal-nesting-level><formatted-label fmt="Command Buffer WS">Command Buffer WS</formatted-label></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *metal-gpu-intervals*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><duration>200000000</duration><process fmt="MyGame (4242)"/></row>
+    <row><duration>300000000</duration><process fmt="MyGame (4242)"/></row>
+    <row><duration>500000000</duration><process fmt="WindowServer (100)"/></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *)
+    echo "<trace-query-result/>"
+    ;;
+esac
+EOF
+
+chmod +x "$MOCK_XCTRACE"
+
+GPU_JSON=$(tmpfile .json)
+if PATH="$MOCK_XCTRACE_DIR:$PATH" python3 "$SCRIPT_DIR/trace-gpu.py" /tmp/mock.trace --json > "$GPU_JSON" 2>/dev/null; then
+    pass "trace-gpu.py runs with mocked xctrace"
+else
+    fail "trace-gpu.py failed with mocked xctrace"
+fi
+
+check "trace-gpu.py JSON valid" python3 -c "import json; json.load(open('$GPU_JSON'))"
+check "trace-gpu.py target process detection" python3 -c "import json; d=json.load(open('$GPU_JSON')); assert d['target_name'] == 'MyGame' and d['target_pid'] == '4242'"
+check "trace-gpu.py active ratio" python3 -c "import json, math; d=json.load(open('$GPU_JSON')); assert math.isclose(d['gpu_states']['active_ratio'], 2/3, rel_tol=1e-3)"
+check "trace-gpu.py command buffer count" python3 -c "import json; d=json.load(open('$GPU_JSON')); assert d['app_intervals']['command_buffers']['count'] == 2"
+check "trace-gpu.py ownership share" python3 -c "import json, math; d=json.load(open('$GPU_JSON')); assert math.isclose(d['gpu_intervals']['target_share'], 0.5, rel_tol=1e-3)"
+
+GPU_JSON_FILTERED=$(tmpfile .json)
+if PATH="$MOCK_XCTRACE_DIR:$PATH" python3 "$SCRIPT_DIR/trace-gpu.py" /tmp/mock.trace --process windowserver --json > "$GPU_JSON_FILTERED" 2>/dev/null; then
+    pass "trace-gpu.py --process override"
+else
+    fail "trace-gpu.py --process override failed"
+fi
+check "trace-gpu.py process override filters app intervals" python3 -c "import json; d=json.load(open('$GPU_JSON_FILTERED')); assert d['app_intervals']['target_rows'] == 1"
 
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -116,6 +242,7 @@ check_exit "trace-speedscope.sh no trace → error" 1 bash "$SCRIPT_DIR/trace-sp
 check_exit "trace-analyze.py no subcommand → error" 1 python3 "$SCRIPT_DIR/trace-analyze.py"
 check_exit "trace-analyze.py summary nonexistent → error" 1 python3 "$SCRIPT_DIR/trace-analyze.py" summary /nonexistent.trace
 check_exit "trace-analyze.py diff bad json → error" 1 python3 "$SCRIPT_DIR/trace-analyze.py" diff /dev/null /dev/null
+check_exit "trace-gpu.py nonexistent trace → error" 1 python3 "$SCRIPT_DIR/trace-gpu.py" /nonexistent.trace
 
 check_output "trace-record.sh bad template → error" "Unknown template" bash "$SCRIPT_DIR/trace-record.sh" -t "Nonexistent Template" -d 1 -- /usr/bin/true
 check_output "trace-flamegraph.sh nonexistent trace → error" "not found" bash "$SCRIPT_DIR/trace-flamegraph.sh" /nonexistent.trace
@@ -129,7 +256,7 @@ echo "━━━ 4. Recording ━━━"
 # Record trace 1 (via trace-record.sh)
 TRACE_FILE="/tmp/xtrace_test_$(date +%s)_1.trace"
 echo "  Recording 3s trace of /usr/bin/yes (trace-record.sh)..."
-TRACE_PATH=$(bash "$SCRIPT_DIR/trace-record.sh" -d 3 -o "$TRACE_FILE" -- /usr/bin/yes 2>/dev/null)
+TRACE_PATH=$(bash "$SCRIPT_DIR/trace-record.sh" -d 3 -o "$TRACE_FILE" -- /usr/bin/yes 2>/dev/null || true)
 
 if [ -n "$TRACE_PATH" ] && [ -e "$TRACE_PATH" ]; then
     pass "trace-record.sh produces trace: $(basename "$TRACE_PATH")"
@@ -141,7 +268,7 @@ fi
 
 # Record trace 2 (via xtrace wrapper)
 echo "  Recording 3s trace of /usr/bin/yes (xtrace)..."
-TRACE_FILE_2=$(bash "$SCRIPT_DIR/xtrace" -d 3 /usr/bin/yes 2>/dev/null)
+TRACE_FILE_2=$(bash "$SCRIPT_DIR/xtrace" -d 3 /usr/bin/yes 2>/dev/null || true)
 
 if [ -n "$TRACE_FILE_2" ] && [ -e "$TRACE_FILE_2" ]; then
     pass "xtrace produces trace: $(basename "$TRACE_FILE_2")"
@@ -160,22 +287,22 @@ else
 fi
 
 # Verify xtrace prints summary to stderr and path to stdout
-XTRACE_STDOUT=$(bash "$SCRIPT_DIR/xtrace" -d 2 /usr/bin/yes 2>/dev/null)
-XTRACE_STDERR=$(bash "$SCRIPT_DIR/xtrace" -d 2 /usr/bin/yes 2>&1 >/dev/null)
+XTRACE_STDOUT=$(bash "$SCRIPT_DIR/xtrace" -d 2 /usr/bin/yes 2>/dev/null || true)
+XTRACE_STDERR=$(bash "$SCRIPT_DIR/xtrace" -d 2 /usr/bin/yes 2>&1 >/dev/null || true)
 CLEANUP_FILES+=("$XTRACE_STDOUT")
 if [ -e "$XTRACE_STDOUT" ]; then
     pass "xtrace stdout is a valid trace path"
 else
     fail "xtrace stdout is not a valid path: $XTRACE_STDOUT"
 fi
-if echo "$XTRACE_STDERR" | grep -q "Samples\|Self%"; then
+if echo "$XTRACE_STDERR" | grep -q "Samples\|Self%\|Top Functions"; then
     pass "xtrace stderr contains summary"
 else
     fail "xtrace stderr missing summary"
 fi
 
 # xtrace --no-summary
-NOSUMMARY_STDERR=$(bash "$SCRIPT_DIR/xtrace" --no-summary -d 2 /usr/bin/yes 2>&1 >/dev/null)
+NOSUMMARY_STDERR=$(bash "$SCRIPT_DIR/xtrace" --no-summary -d 2 /usr/bin/yes 2>&1 >/dev/null || true)
 if echo "$NOSUMMARY_STDERR" | grep -q "Self%"; then
     fail "xtrace --no-summary still prints summary"
 else
@@ -185,11 +312,32 @@ fi
 # Decimal duration (e.g. 2.5s)
 DECIMAL_DUR_TRACE="/tmp/xtrace_test_decimal_$(date +%s).trace"
 CLEANUP_FILES+=("$DECIMAL_DUR_TRACE")
-DECIMAL_DUR_PATH=$(bash "$SCRIPT_DIR/trace-record.sh" -d 1.5s -o "$DECIMAL_DUR_TRACE" -- /usr/bin/yes 2>/dev/null || true)
-if [ -n "$DECIMAL_DUR_PATH" ] && [ -e "$DECIMAL_DUR_PATH" ]; then
+DECIMAL_OK=false
+for attempt in 1 2; do
+    rm -rf "$DECIMAL_DUR_TRACE" 2>/dev/null || true
+    DECIMAL_DUR_PATH=$(bash "$SCRIPT_DIR/trace-record.sh" -d 1.5s -o "$DECIMAL_DUR_TRACE" -- /usr/bin/yes 2>/dev/null || true)
+    if [ -n "$DECIMAL_DUR_PATH" ] && [ -e "$DECIMAL_DUR_PATH" ]; then
+        DECIMAL_OK=true
+        break
+    fi
+    sleep 1
+done
+if [ "$DECIMAL_OK" = true ]; then
     pass "trace-record.sh accepts decimal duration (1.5s)"
 else
     fail "trace-record.sh rejects decimal duration (1.5s)"
+fi
+
+if [ "$HAS_METAL_TEMPLATE" = true ]; then
+    GPU_TRACE_PATH=$(bash "$SCRIPT_DIR/xtrace" --gpu --no-summary -d 2 /usr/bin/yes 2>/dev/null || true)
+    if [ -n "$GPU_TRACE_PATH" ] && [ -e "$GPU_TRACE_PATH" ]; then
+        pass "xtrace --gpu records a Metal System Trace"
+        CLEANUP_FILES+=("$GPU_TRACE_PATH")
+    else
+        fail "xtrace --gpu failed to record a trace"
+    fi
+else
+    skip "xtrace --gpu recording skipped (Metal System Trace template unavailable)"
 fi
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -248,7 +396,7 @@ echo ""
 echo "━━━ 7. Analysis: calltree ━━━"
 # ══════════════════════════════════════════════════════════════════════════════
 
-TREE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" 2>&1)
+TREE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" 2>&1 || true)
 if echo "$TREE_OUT" | grep -q '├\|└'; then pass "calltree has tree chars"
 else fail "calltree missing tree chars"; fi
 
@@ -256,8 +404,8 @@ check_output "calltree --depth 3" "%" python3 "$SCRIPT_DIR/trace-analyze.py" cal
 check_output "calltree --min-pct 10" "%" python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --min-pct 10
 
 # Depth limiting works (shallow tree should have fewer lines)
-DEEP=$(python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --depth 20 2>&1 | wc -l)
-SHALLOW=$(python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --depth 3 2>&1 | wc -l)
+DEEP=$(python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --depth 20 2>&1 | wc -l || true)
+SHALLOW=$(python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --depth 3 2>&1 | wc -l || true)
 if [ "$SHALLOW" -le "$DEEP" ]; then pass "calltree --depth limits output ($SHALLOW <= $DEEP lines)"
 else fail "calltree --depth didn't reduce output"; fi
 
@@ -266,7 +414,7 @@ echo ""
 echo "━━━ 8. Analysis: collapsed ━━━"
 # ══════════════════════════════════════════════════════════════════════════════
 
-COLLAPSED_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" 2>&1)
+COLLAPSED_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" 2>&1 || true)
 if echo "$COLLAPSED_OUT" | grep -q ";"; then pass "collapsed has semicolons"
 else fail "collapsed missing semicolons"; fi
 
@@ -280,12 +428,12 @@ if [ "$BAD_LINES" -eq 0 ]; then pass "collapsed format valid (every line ends wi
 else fail "collapsed has $BAD_LINES malformed lines"; fi
 
 # --with-module flag (new name)
-MODULE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --with-module 2>&1)
+MODULE_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --with-module 2>&1 || true)
 if echo "$MODULE_OUT" | grep -q '\['; then pass "collapsed --with-module includes [module] tags"
 else fail "collapsed --with-module missing module tags"; fi
 
 # --module still works (backwards compat)
-MODULE_OUT2=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --module 2>&1)
+MODULE_OUT2=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --module 2>&1 || true)
 if echo "$MODULE_OUT2" | grep -q '\['; then pass "collapsed --module backwards compat"
 else fail "collapsed --module backwards compat broken"; fi
 
@@ -295,7 +443,7 @@ echo "━━━ 9. Analysis: diff ━━━"
 # ══════════════════════════════════════════════════════════════════════════════
 
 # Same file diff (should show all unchanged)
-DIFF_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$JSON_FILE" 2>&1)
+DIFF_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$JSON_FILE" 2>&1 || true)
 if echo "$DIFF_OUT" | grep -q "UNCHANGED\|DIFF"; then pass "diff same-file shows unchanged"
 else fail "diff output unexpected"; fi
 
@@ -314,7 +462,7 @@ json.dump(d, open('$MODIFIED_JSON', 'w'))
 check_output "diff with changes shows IMPROVED" "IMPROVED" python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$MODIFIED_JSON"
 
 # diff shows both self and total columns
-DIFF_DETAIL=$(python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$MODIFIED_JSON" 2>&1)
+DIFF_DETAIL=$(python3 "$SCRIPT_DIR/trace-analyze.py" diff "$JSON_FILE" "$MODIFIED_JSON" 2>&1 || true)
 if echo "$DIFF_DETAIL" | grep -q "Δself"; then pass "diff shows Δself column"
 else fail "diff missing Δself column"; fi
 if echo "$DIFF_DETAIL" | grep -q "Δtotal"; then pass "diff shows Δtotal column"
@@ -352,27 +500,48 @@ echo "━━━ 11. trace-flamegraph.sh (inferno pipeline) ━━━"
 # ══════════════════════════════════════════════════════════════════════════════
 
 INFERNO_SVG=$(tmpfile .svg)
-bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$INFERNO_SVG" "$TRACE_PATH" 2>/dev/null
+TRACE_FLAMEGRAPH_LOG=$(tmpfile .log)
+if bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$INFERNO_SVG" "$TRACE_PATH" 2>"$TRACE_FLAMEGRAPH_LOG"; then
+    pass "trace-flamegraph.sh runs"
+else
+    fail "trace-flamegraph.sh failed"
+fi
 check_file "trace-flamegraph.sh produces SVG" "$INFERNO_SVG"
 
-# Verify it used inferno (SVG should have inferno comment)
-if grep -q "inferno\|FlameGraph" "$INFERNO_SVG" 2>/dev/null; then pass "SVG generated by inferno"
-else fail "SVG doesn't appear to be from inferno"; fi
+if [ "$HAS_INFERNO" = true ]; then
+    if grep -q "Tool: inferno" "$TRACE_FLAMEGRAPH_LOG"; then pass "trace-flamegraph.sh auto-selects inferno"
+    else fail "trace-flamegraph.sh did not select inferno"; fi
+else
+    if grep -q "Tool: builtin\|Tool: flamegraph.pl" "$TRACE_FLAMEGRAPH_LOG"; then pass "trace-flamegraph.sh fallback tool selected"
+    else fail "trace-flamegraph.sh did not report selected fallback tool"; fi
+fi
 
 # With --title
 TITLED_SVG=$(tmpfile .svg)
-bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$TITLED_SVG" -t "Test Title" "$TRACE_PATH" 2>/dev/null
+if bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$TITLED_SVG" -t "Test Title" "$TRACE_PATH" >/dev/null 2>&1; then
+    pass "trace-flamegraph.sh --title runs"
+else
+    fail "trace-flamegraph.sh --title failed"
+fi
 if grep -q "Test Title" "$TITLED_SVG" 2>/dev/null; then pass "trace-flamegraph.sh --title"
 else fail "title not in SVG"; fi
 
 # With --width
 WIDE2_SVG=$(tmpfile .svg)
-bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$WIDE2_SVG" -w 3000 "$TRACE_PATH" 2>/dev/null
+if bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$WIDE2_SVG" -w 3000 "$TRACE_PATH" >/dev/null 2>&1; then
+    pass "trace-flamegraph.sh -w 3000 runs"
+else
+    fail "trace-flamegraph.sh -w 3000 failed"
+fi
 check_file "trace-flamegraph.sh -w 3000" "$WIDE2_SVG"
 
 # Force builtin tool
 BUILTIN2_SVG=$(tmpfile .svg)
-bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$BUILTIN2_SVG" --tool builtin "$TRACE_PATH" 2>/dev/null
+if bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$BUILTIN2_SVG" --tool builtin "$TRACE_PATH" >/dev/null 2>&1; then
+    pass "trace-flamegraph.sh --tool builtin runs"
+else
+    fail "trace-flamegraph.sh --tool builtin failed"
+fi
 check_file "trace-flamegraph.sh --tool builtin" "$BUILTIN2_SVG"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -380,14 +549,26 @@ echo ""
 echo "━━━ 12. trace-diff-flamegraph.sh ━━━"
 # ══════════════════════════════════════════════════════════════════════════════
 
-DIFF_SVG=$(tmpfile .svg)
-bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" -o "$DIFF_SVG" "$TRACE_PATH" "$TRACE_PATH" 2>/dev/null
-check_file "trace-diff-flamegraph.sh produces SVG" "$DIFF_SVG"
+if [ "$HAS_INFERNO" = true ]; then
+    DIFF_SVG=$(tmpfile .svg)
+    if bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" -o "$DIFF_SVG" "$TRACE_PATH" "$TRACE_PATH" >/dev/null 2>&1; then
+        pass "trace-diff-flamegraph.sh runs"
+    else
+        fail "trace-diff-flamegraph.sh failed"
+    fi
+    check_file "trace-diff-flamegraph.sh produces SVG" "$DIFF_SVG"
 
-# With title
-DIFF_TITLED_SVG=$(tmpfile .svg)
-bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" -o "$DIFF_TITLED_SVG" -t "Diff Test" "$TRACE_PATH" "$TRACE_PATH" 2>/dev/null
-check_file "trace-diff-flamegraph.sh with title" "$DIFF_TITLED_SVG"
+    # With title
+    DIFF_TITLED_SVG=$(tmpfile .svg)
+    if bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" -o "$DIFF_TITLED_SVG" -t "Diff Test" "$TRACE_PATH" "$TRACE_PATH" >/dev/null 2>&1; then
+        pass "trace-diff-flamegraph.sh --title runs"
+    else
+        fail "trace-diff-flamegraph.sh --title failed"
+    fi
+    check_file "trace-diff-flamegraph.sh with title" "$DIFF_TITLED_SVG"
+else
+    skip "trace-diff-flamegraph.sh skipped (inferno not installed)"
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -395,22 +576,22 @@ echo "━━━ 13. Piping: stdin with - ━━━"
 # ══════════════════════════════════════════════════════════════════════════════
 
 # trace-analyze.py summary -
-PIPE_SUMMARY=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" summary - --top 5 2>&1)
+PIPE_SUMMARY=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" summary - --top 5 2>&1 || true)
 if echo "$PIPE_SUMMARY" | grep -q "Samples"; then pass "trace-analyze.py summary - (pipe)"
 else fail "trace-analyze.py summary - pipe failed"; fi
 
 # trace-analyze.py timeline -
-PIPE_TIMELINE=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" timeline - --window 1s 2>&1)
+PIPE_TIMELINE=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" timeline - --window 1s 2>&1 || true)
 if echo "$PIPE_TIMELINE" | grep -q "Top Functions"; then pass "trace-analyze.py timeline - (pipe)"
 else fail "trace-analyze.py timeline - pipe failed"; fi
 
 # trace-analyze.py calltree -
-PIPE_TREE=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" calltree - 2>&1)
+PIPE_TREE=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" calltree - 2>&1 || true)
 if echo "$PIPE_TREE" | grep -q '├\|└\|%'; then pass "trace-analyze.py calltree - (pipe)"
 else fail "trace-analyze.py calltree - pipe failed"; fi
 
 # trace-analyze.py collapsed -
-PIPE_COLLAPSED=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" collapsed - 2>&1)
+PIPE_COLLAPSED=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" collapsed - 2>&1 || true)
 if echo "$PIPE_COLLAPSED" | grep -q ";"; then pass "trace-analyze.py collapsed - (pipe)"
 else fail "trace-analyze.py collapsed - pipe failed"; fi
 
@@ -425,7 +606,7 @@ echo "$TRACE_PATH" | timeout 30 bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$PIPE
 check_file "trace-flamegraph.sh - (pipe)" "$PIPE_INFERNO_SVG"
 
 # trace-analyze.py summary --json - (pipe JSON)
-PIPE_JSON=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" summary - --json 2>/dev/null)
+PIPE_JSON=$(echo "$TRACE_PATH" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" summary - --json 2>/dev/null || true)
 if echo "$PIPE_JSON" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
     pass "trace-analyze.py summary --json - (pipe valid JSON)"
 else
@@ -450,7 +631,7 @@ check_output "summary --time-range 0s-2s" "Samples" python3 "$SCRIPT_DIR/trace-a
 
 # Test that a range straddling real samples works — use 0s to half duration
 HALF_DUR=$(python3 -c "import json; d=json.load(open('$JSON_FILE')); print(f\"{d['duration_s']/2:.1f}s\")" 2>/dev/null || echo "1.5s")
-HALF_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "0s-$HALF_DUR" 2>&1)
+HALF_OUT=$(python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --time-range "0s-$HALF_DUR" 2>&1 || true)
 if echo "$HALF_OUT" | grep -q "Samples\|No samples"; then pass "summary --time-range 0s-${HALF_DUR} (valid response)"
 else fail "summary --time-range 0s-${HALF_DUR} gave unexpected output"; fi
 
@@ -461,8 +642,8 @@ check_output "timeline --time-range 0s-2s" "Top Functions" python3 "$SCRIPT_DIR/
 check_output "calltree --time-range 0s-2s" "%" python3 "$SCRIPT_DIR/trace-analyze.py" calltree "$TRACE_PATH" --time-range "0s-2s"
 
 # Collapsed with time range
-RANGE_COLLAPSED=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --time-range "0s-2s" 2>&1)
-FULL_COLLAPSED=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" 2>&1)
+RANGE_COLLAPSED=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" --time-range "0s-2s" 2>&1 || true)
+FULL_COLLAPSED=$(python3 "$SCRIPT_DIR/trace-analyze.py" collapsed "$TRACE_PATH" 2>&1 || true)
 RANGE_COUNT=$(echo "$RANGE_COLLAPSED" | wc -l | tr -d ' ')
 FULL_COUNT=$(echo "$FULL_COLLAPSED" | wc -l | tr -d ' ')
 if [ "$RANGE_COUNT" -le "$FULL_COUNT" ]; then pass "time-range reduces collapsed output ($RANGE_COUNT <= $FULL_COUNT)"
@@ -470,7 +651,7 @@ else fail "time-range didn't reduce output"; fi
 
 # Flamegraph with time range
 RANGE_SVG=$(tmpfile .svg)
-bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$RANGE_SVG" --time-range "0s-2s" "$TRACE_PATH" 2>/dev/null
+bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$RANGE_SVG" --time-range "0s-2s" "$TRACE_PATH" 2>/dev/null || true
 check_file "trace-flamegraph.sh --time-range" "$RANGE_SVG"
 
 # ms format
@@ -489,7 +670,7 @@ echo "━━━ 15. sample-quick.sh ━━━"
 YES_PID=$!
 sleep 0.3
 
-SAMPLE_PATH=$(bash "$SCRIPT_DIR/sample-quick.sh" "$YES_PID" 1 2>/dev/null)
+SAMPLE_PATH=$(bash "$SCRIPT_DIR/sample-quick.sh" "$YES_PID" 1 2>/dev/null || true)
 kill "$YES_PID" 2>/dev/null || true
 wait "$YES_PID" 2>/dev/null || true
 
@@ -529,30 +710,30 @@ echo "━━━ 16. Symlink resolution ━━━"
 
 # Test that scripts work when called via symlinks (the real user path)
 if [ -L "$HOME/.local/bin/xtrace" ]; then
-    SYMLINK_TRACE=$("$HOME/.local/bin/xtrace" -d 2 /usr/bin/yes 2>/dev/null)
+    SYMLINK_TRACE=$("$HOME/.local/bin/xtrace" -d 2 /usr/bin/yes 2>/dev/null || true)
     if [ -n "$SYMLINK_TRACE" ] && [ -e "$SYMLINK_TRACE" ]; then
         pass "xtrace works via symlink"
         CLEANUP_FILES+=("$SYMLINK_TRACE")
 
         # trace-analyze.py via symlink
-        SYMLINK_SUMMARY=$("$HOME/.local/bin/trace-analyze.py" summary "$SYMLINK_TRACE" --top 3 2>&1)
+        SYMLINK_SUMMARY=$("$HOME/.local/bin/trace-analyze.py" summary "$SYMLINK_TRACE" --top 3 2>&1 || true)
         if echo "$SYMLINK_SUMMARY" | grep -q "Samples"; then pass "trace-analyze.py works via symlink"
         else fail "trace-analyze.py via symlink failed"; fi
 
         # trace-flamegraph via symlink
         SYMLINK_SVG=$(tmpfile .svg)
-        "$HOME/.local/bin/trace-flamegraph" -o "$SYMLINK_SVG" "$SYMLINK_TRACE" 2>/dev/null
+        "$HOME/.local/bin/trace-flamegraph" -o "$SYMLINK_SVG" "$SYMLINK_TRACE" 2>/dev/null || true
         check_file "trace-flamegraph works via symlink" "$SYMLINK_SVG"
 
         # pipe via symlinks
         SYMLINK_PIPE_SVG=$(tmpfile .svg)
-        echo "$SYMLINK_TRACE" | "$HOME/.local/bin/trace-flamegraph" -o "$SYMLINK_PIPE_SVG" - 2>/dev/null
+        echo "$SYMLINK_TRACE" | "$HOME/.local/bin/trace-flamegraph" -o "$SYMLINK_PIPE_SVG" - 2>/dev/null || true
         check_file "pipe via symlinks" "$SYMLINK_PIPE_SVG"
     else
         fail "xtrace via symlink failed"
     fi
 else
-    echo "  (skipped — symlinks not installed)"
+    skip "symlink tests skipped — ~/.local/bin/xtrace not installed"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -562,21 +743,21 @@ echo "━━━ 17. Full pipeline: xtrace → analyze → flamegraph ━━━"
 
 # Simulate: cmake --build . && xtrace ./app | trace-flamegraph - -o out.svg
 PIPELINE_SVG=$(tmpfile .svg)
-PIPELINE_TRACE=$(bash "$SCRIPT_DIR/xtrace" -d 2 /usr/bin/yes 2>/dev/null)
+PIPELINE_TRACE=$(bash "$SCRIPT_DIR/xtrace" -d 2 /usr/bin/yes 2>/dev/null || true)
 CLEANUP_FILES+=("$PIPELINE_TRACE")
 
 if [ -n "$PIPELINE_TRACE" ] && [ -e "$PIPELINE_TRACE" ]; then
     # Pipe to flamegraph
-    echo "$PIPELINE_TRACE" | timeout 30 bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$PIPELINE_SVG" - 2>/dev/null
+    echo "$PIPELINE_TRACE" | timeout 30 bash "$SCRIPT_DIR/trace-flamegraph.sh" -o "$PIPELINE_SVG" - 2>/dev/null || true
     check_file "full pipeline: xtrace → flamegraph" "$PIPELINE_SVG"
 
     # Pipe to summary JSON
     PIPELINE_JSON=$(tmpfile .json)
-    echo "$PIPELINE_TRACE" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" summary - --json > "$PIPELINE_JSON" 2>/dev/null
+    echo "$PIPELINE_TRACE" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" summary - --json > "$PIPELINE_JSON" 2>/dev/null || true
     check "full pipeline: xtrace → summary JSON" python3 -c "import json; json.load(open('$PIPELINE_JSON'))"
 
     # Pipe to collapsed
-    PIPELINE_COLLAPSED=$(echo "$PIPELINE_TRACE" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" collapsed - 2>&1)
+    PIPELINE_COLLAPSED=$(echo "$PIPELINE_TRACE" | timeout 30 python3 "$SCRIPT_DIR/trace-analyze.py" collapsed - 2>&1 || true)
     if echo "$PIPELINE_COLLAPSED" | grep -q ";"; then pass "full pipeline: xtrace → collapsed"
     else fail "full pipeline collapsed failed"; fi
 else
@@ -586,14 +767,17 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-TOTAL=$((PASS + FAIL))
-echo "  $PASS/$TOTAL passed"
+TOTAL=$((PASS + FAIL + SKIP))
+echo "  Passed:  $PASS"
+echo "  Skipped: $SKIP"
+echo "  Failed:  $FAIL"
+echo "  Total:   $TOTAL"
 if [ "$FAIL" -gt 0 ]; then
     echo ""
     echo "  Failures:"
     echo -e "$ERRORS"
     exit 1
 else
-    echo "  All tests passed ✓"
+    echo "  All mandatory tests passed ✓"
     exit 0
 fi

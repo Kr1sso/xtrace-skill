@@ -1,6 +1,6 @@
-# xtrace — Command-line CPU Profiling for macOS
+# xtrace — Command-line CPU/GPU/Memory Profiling for macOS
 
-Unix-style profiling tools for macOS Instruments. Record traces, analyze hotspots, generate flamegraphs — all from the terminal, all composable with pipes.
+Unix-style profiling tools for macOS Instruments. Record traces, analyze CPU hotspots, inspect GPU utilization, and investigate memory behavior — all from the terminal, all composable with pipes.
 
 ```bash
 # Profile any command. Just prefix it.
@@ -60,7 +60,7 @@ npm install -g speedscope    # Interactive web UI (sandwich view, time-ordered, 
 
 ```bash
 ./scripts/trace-check.sh     # check environment
-./test.sh                    # run 37 end-to-end tests
+./test.sh                    # run end-to-end tests
 ```
 
 ### Requirements
@@ -72,14 +72,18 @@ npm install -g speedscope    # Interactive web UI (sandwich view, time-ordered, 
 ## Quick Start
 
 ```bash
-# Profile a command for 10 seconds
+# CPU profiling (default Time Profiler)
 xtrace -d 10 ./my_app
 
-# The summary prints to stderr, the trace path prints to stdout.
-# Pipe to any visualization tool:
-xtrace ./my_app | trace-speedscope -      # flamegraph in browser
-xtrace ./my_app | trace-speedscope -             # interactive analysis
-xtrace ./my_app | trace-analyze.py summary -     # text summary
+# GPU profiling (Metal System Trace)
+xtrace --gpu -d 10 ./my_app
+
+# Memory analysis
+trace-memory.py summary -- ./my_app
+
+# The trace path prints to stdout so you can pipe it:
+xtrace ./my_app | trace-speedscope -
+xtrace ./my_app | trace-analyze.py summary -
 ```
 
 ## Tools
@@ -96,9 +100,12 @@ xtrace [options] command [args...]
 |---|---|
 | `-d DURATION` | Recording time limit (default: `30s`). Accepts: `10`, `10s`, `2.5s`, `500ms`, `2m` |
 | `-t TEMPLATE` | Instruments template (default: `Time Profiler`) |
+| `--gpu` | Shortcut for `-t "Metal System Trace"` + GPU summary |
+| `--cpu` | Shortcut for `-t "Time Profiler"` |
+| `--gpu-process NAME` | Override process filter for GPU summary matching |
 | `-o PATH` | Output `.trace` file path (default: auto in `/tmp`) |
 | `--no-summary` | Skip the auto-printed summary |
-| `--top N` | Functions to show in summary (default: `15`) |
+| `--top N` | Functions to show in CPU summary (default: `15`) |
 
 **Output:** Summary to stderr, trace file path to stdout.
 
@@ -287,6 +294,42 @@ REGRESSED ↑ (more CPU time):
 
 ---
 
+### `trace-gpu.py` — GPU Summary for Metal System Trace
+
+Analyze GPU-heavy traces from `xtrace --gpu` or `trace-record.sh -t 'Metal System Trace'`.
+
+```bash
+trace-gpu.py recording.trace
+trace-gpu.py recording.trace --json > gpu_report.json
+trace-gpu.py recording.trace --process MyWorker
+```
+
+Reports include:
+- GPU state utilization (Active/Idle time)
+- Command-buffer cadence (count, avg/median/p95 durations)
+- GPU ownership share by process (target vs competitors)
+
+---
+
+### `trace-memory.py` — Memory Analysis (Summary, Leaks, Growth)
+
+Quick memory tooling that complements Instruments memory templates.
+
+```bash
+trace-memory.py summary -- ./my_app
+trace-memory.py leaks -- ./my_app
+trace-memory.py growth -d 30 --interval 2 -- ./my_app
+```
+
+Use with recordings when needed:
+
+```bash
+xtrace -t Allocations ./my_app
+xtrace -t Leaks ./my_app
+```
+
+---
+
 ### `trace-flamegraph.sh` — Flamegraph Generator
 
 Auto-detects the best available tool: inferno → flamegraph.pl → built-in.
@@ -366,10 +409,12 @@ sample-quick.sh <pid|name> [duration] [interval_ms] [output_file]
 | Template | Use When | Resolution | Overhead |
 |---|---|---|---|
 | **Time Profiler** | General CPU profiling — **start here** | 1ms sampling | Very low |
+| **Metal System Trace** | GPU utilization, command-buffer cadence, CPU/GPU correlation | Event intervals | Medium |
 | **System Trace** | Thread contention, syscalls, lock issues, scheduling | Microsecond | Medium |
 | **Processor Trace** | Need every function call, instruction-level | Every branch | Low-medium |
 | **CPU Counters** | IPC, cache misses, branch mispredictions | Per-event | Low |
-| **Allocations** | Memory leaks, allocation rates, object lifetimes | Per-allocation | Medium |
+| **Allocations** | Memory usage, object lifetimes, allocation rates | Per-allocation | Medium |
+| **Leaks** | Leak detection and allocation backtraces | Per-allocation | Medium |
 
 **Processor Trace** requires Apple Silicon and must be enabled in **System Settings → Privacy & Security → Developer Tools**.
 
@@ -469,7 +514,7 @@ xtrace (entry point)
         └── xctrace record (Apple's tool)
               └── .trace file
 
-trace-analyze.py (analysis engine, Python, stdlib only)
+trace-analyze.py (CPU analysis engine, Python, stdlib only)
   ├── summary    → text or JSON
   ├── timeline   → time-bucketed view
   ├── calltree   → call hierarchy
@@ -477,6 +522,8 @@ trace-analyze.py (analysis engine, Python, stdlib only)
   ├── flamegraph → built-in SVG (fallback)
   └── diff       → before/after comparison
 
+trace-gpu.py     ──→ Metal System Trace GPU summaries (state, cadence, ownership)
+trace-memory.py  ──→ RSS/VM/leak/growth analysis for launch or attach modes
 trace-flamegraph.sh ──→ inferno (preferred) or flamegraph.pl or builtin
 trace-speedscope.sh ──→ speedscope (interactive web UI)
 trace-diff-flamegraph.sh ──→ inferno-diff-folded + inferno-flamegraph
