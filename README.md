@@ -78,8 +78,28 @@ xtrace -d 10 ./my_app
 # GPU profiling (Metal System Trace)
 xtrace --gpu -d 10 ./my_app
 
+# Enable Shader Timeline for real shader hotspot / callsite tooling
+xtrace --gpu --shader-timeline -d 10 ./my_shader_app
+
+# Interactive shader stack exploration in speedscope
+TRACE=$(xtrace --gpu --shader-timeline --no-summary -d 10 ./my_shader_app)
+trace-shader-speedscope.sh "$TRACE"
+
+# Broader Metal profiling (Game Performance template)
+xtrace -t 'Game Performance' -d 10 ./my_metal_app
+
+# Custom Metal instrument set
+xtrace --instrument GPU --instrument 'Metal Application' -d 10 ./my_metal_app
+
 # Memory analysis
 trace-memory.py summary -- ./my_app
+
+# Programmatic GPU trace capture from a Metal app that uses MTLCaptureManager
+# .gputrace bundles do NOT come from xctrace/Instruments CLI recording.
+# You need host-app code that calls MTLCaptureManager (or Xcode GUI capture).
+MTL_CAPTURE_ENABLED=1 ./build/examples/metal_compute_demo \
+  --capture-only /tmp/metal_compute_demo.gputrace --seconds 0.2
+trace-gputrace.py info /tmp/metal_compute_demo.gputrace
 
 # The trace path prints to stdout so you can pipe it:
 xtrace ./my_app | trace-speedscope -
@@ -100,12 +120,14 @@ xtrace [options] command [args...]
 |---|---|
 | `-d DURATION` | Recording time limit (default: `30s`). Accepts: `10`, `10s`, `2.5s`, `500ms`, `2m` |
 | `-t TEMPLATE` | Instruments template (default: `Time Profiler`) |
+| `--instrument NAME` | Add an Instruments instrument by name (repeatable) |
+| `--shader-timeline` | Patch a GPU template on the fly so Metal Shader Timeline is enabled |
 | `--gpu` | Shortcut for `-t "Metal System Trace"` + GPU summary |
 | `--cpu` | Shortcut for `-t "Time Profiler"` |
 | `--gpu-process NAME` | Override process filter for GPU summary matching |
 | `-o PATH` | Output `.trace` file path (default: auto in `/tmp`) |
 | `--no-summary` | Skip the auto-printed summary |
-| `--top N` | Functions to show in CPU summary (default: `15`) |
+| `--top N` | Functions to show in CPU / shader summaries (default: `15`) |
 
 **Output:** Summary to stderr, trace file path to stdout.
 
@@ -132,6 +154,8 @@ trace-record.sh [options] [-- command args...]
 | Option | Description |
 |---|---|
 | `-t, --template NAME` | Template (default: `Time Profiler`) |
+| `-i, --instrument NAME` | Add an Instruments instrument by name (repeatable) |
+| `--shader-timeline` | Enable Metal Shader Timeline by patching a GPU template on the fly |
 | `-d, --duration SEC` | Duration: `10`, `10s`, `2.5s`, `500ms`, `2m` (default: `10s`) |
 | `-o, --output PATH` | Output path (default: auto-timestamped) |
 | `-p, --pid PID` | Attach to running process by PID |
@@ -157,6 +181,15 @@ trace-record.sh -d 10 -a
 
 # Different template
 trace-record.sh -t 'System Trace' -d 10 -- ./my_app
+
+# Custom Metal instrument set
+trace-record.sh --instrument GPU --instrument 'Metal Application' -d 10 -- ./my_metal_app
+
+# Enable Shader Timeline on a Metal template
+trace-record.sh -t 'Metal System Trace' --shader-timeline -d 10 -- ./my_shader_app
+
+# Template + extra Metal instruments
+trace-record.sh -t 'Game Performance' --instrument 'Metal GPU Counters' -d 10 -- ./my_game
 
 # With environment variables
 trace-record.sh -e MALLOC_STACK_LOGGING=1 -d 10 -- ./my_app
@@ -294,9 +327,9 @@ REGRESSED ↑ (more CPU time):
 
 ---
 
-### `trace-gpu.py` — GPU Summary for Metal System Trace
+### `trace-gpu.py` — GPU / Metal Summary
 
-Analyze GPU-heavy traces from `xtrace --gpu` or `trace-record.sh -t 'Metal System Trace'`.
+Analyze Metal-heavy traces from `xtrace --gpu`, `xtrace -t 'Game Performance'`, or custom instrument recordings such as `trace-record.sh --instrument GPU --instrument 'Metal Application'`.
 
 ```bash
 trace-gpu.py recording.trace
@@ -305,9 +338,141 @@ trace-gpu.py recording.trace --process MyWorker
 ```
 
 Reports include:
-- GPU state utilization (Active/Idle time)
-- Command-buffer cadence (count, avg/median/p95 durations)
-- GPU ownership share by process (target vs competitors)
+- GPU state utilization and GPU performance-state residency
+- Metal application intervals, command-buffer submissions, and encoder cadence
+- Shader inventory plus shader-timeline data when shader profiler rows are present
+- CPU→GPU start latency, submission→completion latency, and GPU ownership share by process
+- Driver activity and GPU counter metadata / aggregated counter intervals when available
+
+Notes:
+- Shader-profiler and GPU-counter tables are surfaced when the trace contains them.
+- Some devices / counter profiles expose metadata but no interval rows; the report calls that out explicitly instead of failing silently.
+
+---
+
+### `trace-shader.py` — Shader Hotspots, Callsites, and Flamegraph Inputs
+
+Analyze the real shader-profiler tables that Instruments exports when **Shader Timeline** is enabled in a GPU trace template.
+
+```bash
+# Record with Shader Timeline enabled
+xtrace --gpu --shader-timeline ./my_shader_app
+
+# Inspect availability / metadata
+trace-shader.py info recording.trace
+
+# Human-readable hotspots
+trace-shader.py hotspots recording.trace
+
+# Callsite / PC tree
+trace-shader.py callsites recording.trace
+
+# Collapsed stacks for inferno / flamegraph.pl
+trace-shader.py collapsed recording.trace
+
+# Built-in SVG flamegraph
+trace-shader.py flamegraph recording.trace -o shader.svg
+```
+
+`trace-shader.py` automatically uses the best shader-profiler data available in the trace:
+1. `metal-shader-profiler-intervals` (high-level shader timeline rows)
+2. `gpu-shader-profiler-interval` (per-PC duration rows)
+3. `gpu-shader-profiler-sample` (per-sample PC stacks)
+
+When human-readable function labels are unavailable, raw PC offsets are emitted (for example `proceduralFragment+0x1a4`).
+
+---
+
+### `trace-shader-flamegraph.sh` — Shader Flamegraph Wrapper
+
+Convenience wrapper around `trace-shader.py collapsed` with the same auto-tool behavior as the CPU flamegraph wrapper. Use this for the **static SVG** shader flamegraph.
+
+```bash
+trace-shader-flamegraph.sh recording.trace -o shader.svg
+trace-shader-flamegraph.sh --stage fragment recording.trace -o fragment.svg
+trace-shader-flamegraph.sh --tool builtin recording.trace -o shader.svg
+```
+
+Uses the best available tool:
+- `inferno-flamegraph`
+- `flamegraph.pl`
+- built-in SVG generation via `trace-shader.py flamegraph`
+
+---
+
+### `trace-shader-speedscope.sh` — Interactive Shader Speedscope View
+
+Open shader collapsed stacks from `trace-shader.py` in speedscope. Use this for the **interactive** shader flamegraph / sandwich / left-heavy exploration.
+
+```bash
+trace-shader-speedscope.sh recording.trace
+trace-shader-speedscope.sh --stage fragment recording.trace
+trace-shader-speedscope.sh --shader pbrFragment recording.trace
+trace-shader-speedscope.sh -o shader.folded recording.trace
+```
+
+Notes:
+- speedscope is the most detailed interactive shader stack viewer we support.
+- It only becomes richly nested when the trace contains real shader-profiler rows.
+- If the trace falls back to coarse GPU intervals, speedscope will only show coarse top-level stacks.
+
+---
+
+### `trace-gputrace.py` — MTLCaptureManager `.gputrace` Inspector
+
+Inspect `.gputrace` bundles produced by Metal apps that call `MTLCaptureManager`.
+
+Important:
+- `xctrace` / Instruments CLI records `.trace`, **not** `.gputrace`.
+- To get a `.gputrace`, you must either:
+  1. capture from **Xcode Metal Debugger**, or
+  2. add **host-project code** that calls `MTLCaptureManager`.
+- This repo ships example Metal apps that already contain that host-side capture code.
+
+```bash
+# Human-readable overview
+trace-gputrace.py info capture.gputrace
+
+# Resource inventory + extracted shader names
+trace-gputrace.py resources capture.gputrace
+
+# Decode a captured buffer by label with a flexible layout
+trace-gputrace.py buffer capture.gputrace --buffer "Compute Values Buffer" --layout float --index 0-8
+trace-gputrace.py buffer capture.gputrace --buffer "Window Vertices" --layout "float2,float4" --index 0-2
+
+# Dump extracted printable strings from internal bundle files
+trace-gputrace.py strings capture.gputrace --limit 80
+
+# Generate an HTML report for browser inspection
+trace-gputrace.py report capture.gputrace -o capture_report.html
+```
+
+What it extracts today:
+- binary-plist capture metadata (`metadata`)
+- bundle file inventory, sizes, and magic bytes
+- raw resource snapshot files (`MTLBuffer-*`, `MTLTexture-*`, `CAMetalLayer-*`)
+- resource labels recovered from bundle internals
+- shader/library names recovered from `device-resources*`
+- flexible buffer decoding with layouts such as `float`, `float2`, `float4`, `float2,float4`
+
+What it does **not** do:
+- create `.gputrace` bundles by itself
+- attach to arbitrary external processes and force them to emit `.gputrace`
+- turn an Instruments `.trace` into a `.gputrace`
+
+---
+
+### `trace-template.py` — Template Patcher
+
+Internal helper that patches an Instruments `.tracetemplate` so GPU traces can be recorded with Shader Timeline enabled from the command line.
+
+```bash
+trace-template.py enable-shader-timeline \
+  '/Applications/Xcode.app/.../Metal System Trace.tracetemplate' \
+  -o /tmp/MetalSystemTraceShaderTimeline.tracetemplate
+```
+
+`xtrace --shader-timeline ...` and `trace-record.sh --shader-timeline ...` call this automatically — you usually do not need to invoke it directly.
 
 ---
 
@@ -409,7 +574,10 @@ sample-quick.sh <pid|name> [duration] [interval_ms] [output_file]
 | Template | Use When | Resolution | Overhead |
 |---|---|---|---|
 | **Time Profiler** | General CPU profiling — **start here** | 1ms sampling | Very low |
-| **Metal System Trace** | GPU utilization, command-buffer cadence, CPU/GPU correlation | Event intervals | Medium |
+| **Metal System Trace** | GPU utilization, command-buffer cadence, shader inventory, CPU/GPU correlation | Event intervals | Medium |
+| **Metal System Trace + Shader Timeline** | Real shader hotspots / callsites / shader flamegraphs via `trace-shader.py` | Event intervals + shader-profiler rows | Medium-high |
+| **Game Performance** | Broader Metal/game traces: GPU state, shader inventory, counters metadata, driver activity | Mixed | Medium |
+| **Game Performance Overview** | High-level graphics/Metal overview metrics when available | Metric intervals | Low-medium |
 | **System Trace** | Thread contention, syscalls, lock issues, scheduling | Microsecond | Medium |
 | **Processor Trace** | Need every function call, instruction-level | Every branch | Low-medium |
 | **CPU Counters** | IPC, cache misses, branch mispredictions | Per-event | Low |
@@ -486,6 +654,30 @@ trace-record.sh -d 10 -p $(pgrep -x MyApp) | trace-speedscope.sh -
 trace-record.sh -d 10 -n Safari | trace-speedscope.sh -
 ```
 
+### Shader Hotspots / Callsites / Flamegraphs
+
+```bash
+# 1. Record a shader-profiler-capable trace
+TRACE=$(xtrace --gpu --shader-timeline --no-summary -d 10 ./my_shader_app)
+
+# 2. Inspect what shader data is available
+trace-shader.py info "$TRACE"
+
+# 3. Human-readable hotspots
+trace-shader.py hotspots "$TRACE"
+
+# 4. Callsite / PC tree
+trace-shader.py callsites "$TRACE"
+
+# 5. Static SVG flamegraph
+trace-shader-flamegraph.sh "$TRACE" -o shader.svg
+
+# 6. Interactive shader speedscope view
+trace-shader-speedscope.sh "$TRACE"
+```
+
+If `trace-shader.py info` reports that Shader Timeline is enabled but there are still no runtime shader rows, the device / driver likely declined to export shader-profiler samples for that counter profile. The tooling remains ready for traces that do contain those rows.
+
 ### LLM / CI Integration
 
 ```bash
@@ -523,9 +715,12 @@ trace-analyze.py (CPU analysis engine, Python, stdlib only)
   └── diff       → before/after comparison
 
 trace-gpu.py     ──→ Metal System Trace GPU summaries (state, cadence, ownership)
+trace-shader.py  ──→ Shader-profiler info, hotspots, callsites, collapsed stacks, SVG
 trace-memory.py  ──→ RSS/VM/leak/growth analysis for launch or attach modes
 trace-flamegraph.sh ──→ inferno (preferred) or flamegraph.pl or builtin
-trace-speedscope.sh ──→ speedscope (interactive web UI)
+trace-shader-flamegraph.sh ──→ shader collapsed stacks → inferno/flamegraph.pl/builtin (static SVG)
+trace-shader-speedscope.sh ──→ shader collapsed stacks → speedscope (interactive)
+trace-speedscope.sh ──→ CPU collapsed stacks → speedscope (interactive web UI)
 trace-diff-flamegraph.sh ──→ inferno-diff-folded + inferno-flamegraph
 ```
 

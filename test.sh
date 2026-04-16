@@ -90,10 +90,38 @@ fi
 check "speedscope available" command -v speedscope
 check "trace-analyze.py compiles" python3 -m py_compile "$SCRIPT_DIR/trace-analyze.py"
 check "trace-gpu.py compiles" python3 -m py_compile "$SCRIPT_DIR/trace-gpu.py"
+check "trace-gputrace.py compiles" python3 -m py_compile "$SCRIPT_DIR/trace-gputrace.py"
+check "trace-template.py compiles" python3 -m py_compile "$SCRIPT_DIR/trace-template.py"
+check "trace-shader.py compiles" python3 -m py_compile "$SCRIPT_DIR/trace-shader.py"
 
 if command -v xctrace >/dev/null 2>&1 && xctrace list templates 2>/dev/null | grep -F "Metal System Trace" >/dev/null; then
     HAS_METAL_TEMPLATE=true
     pass "Metal System Trace template available"
+
+    METAL_TEMPLATE_PATH=$(find /Applications/Xcode.app/Contents/Applications/Instruments.app -type f -name 'Metal System Trace.tracetemplate' 2>/dev/null | head -1 || true)
+    if [ -n "$METAL_TEMPLATE_PATH" ] && [ -f "$METAL_TEMPLATE_PATH" ]; then
+        PATCHED_TEMPLATE=$(tmpfile .tracetemplate)
+        if python3 "$SCRIPT_DIR/trace-template.py" enable-shader-timeline "$METAL_TEMPLATE_PATH" -o "$PATCHED_TEMPLATE" >/dev/null 2>&1; then
+            pass "trace-template.py patches Metal System Trace"
+            check "patched template has shaderprofiler enabled" python3 -c "import plistlib; objs=plistlib.load(open('$PATCHED_TEMPLATE','rb'))['\$objects']; found=False
+for o in objs:
+    if isinstance(o, dict) and 'NS.keys' in o and 'NS.objects' in o:
+        try:
+            keys=[objs[u.data] for u in o['NS.keys']]
+        except Exception:
+            continue
+        for idx, key in enumerate(keys):
+            if key == 'shaderprofiler':
+                ref=o['NS.objects'][idx]
+                val=objs[ref.data] if hasattr(ref, 'data') else ref
+                found = found or (val is True)
+assert found"
+        else
+            fail "trace-template.py failed to patch Metal System Trace"
+        fi
+    else
+        skip "Metal System Trace template path not found (template patch test skipped)"
+    fi
 else
     skip "Metal System Trace template unavailable (GPU recording test skipped)"
 fi
@@ -106,9 +134,13 @@ echo "━━━ 2. Help text (every script, every subcommand) ━━━"
 check_output "xtrace --help" "Usage:" bash "$SCRIPT_DIR/xtrace" --help
 check_output "xtrace --help mentions --gpu" "--gpu" bash "$SCRIPT_DIR/xtrace" --help
 check_output "xtrace --help mentions --gpu-process" "gpu-process" bash "$SCRIPT_DIR/xtrace" --help
+check_output "xtrace --help mentions --instrument" "instrument" bash "$SCRIPT_DIR/xtrace" --help
+check_output "xtrace --help mentions --shader-timeline" "shader-timeline" bash "$SCRIPT_DIR/xtrace" --help
 check_output "xtrace -h" "Usage:" bash "$SCRIPT_DIR/xtrace" -h
 check_output "trace-record.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-record.sh" --help
 check_output "trace-record.sh --help mentions --wait-for" "wait-for" bash "$SCRIPT_DIR/trace-record.sh" --help
+check_output "trace-record.sh --help mentions --instrument" "instrument" bash "$SCRIPT_DIR/trace-record.sh" --help
+check_output "trace-record.sh --help mentions --shader-timeline" "shader-timeline" bash "$SCRIPT_DIR/trace-record.sh" --help
 check_output "trace-flamegraph.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-flamegraph.sh" --help
 check_output "trace-flamegraph.sh --help no --open" "speedscope" bash "$SCRIPT_DIR/trace-flamegraph.sh" --help
 check_output_not "trace-flamegraph.sh --help no --open flag" "\-\-open" bash "$SCRIPT_DIR/trace-flamegraph.sh" --help
@@ -117,12 +149,22 @@ check_output "trace-diff-flamegraph.sh --help" "Usage:" bash "$SCRIPT_DIR/trace-
 check_output_not "trace-diff-flamegraph.sh --help no --open" "\-\-open" bash "$SCRIPT_DIR/trace-diff-flamegraph.sh" --help
 check_output "sample-quick.sh --help" "Usage:" bash "$SCRIPT_DIR/sample-quick.sh" --help
 check_output "trace-gpu.py --help" "Analyze GPU-centric metrics" python3 "$SCRIPT_DIR/trace-gpu.py" --help
+check_output "trace-gputrace.py --help" ".gputrace" python3 "$SCRIPT_DIR/trace-gputrace.py" --help
+check_output "trace-template.py --help" "enable-shader-timeline" python3 "$SCRIPT_DIR/trace-template.py" --help
+check_output "trace-shader.py --help" "hotspots" python3 "$SCRIPT_DIR/trace-shader.py" --help
+check_output "trace-shader-flamegraph.sh --help" "shader flamegraph" bash "$SCRIPT_DIR/trace-shader-flamegraph.sh" --help
+check_output "trace-shader-speedscope.sh --help" "shader collapsed stacks" bash "$SCRIPT_DIR/trace-shader-speedscope.sh" --help
 check_output "trace-check.sh runs" "xctrace" bash "$SCRIPT_DIR/trace-check.sh"
 
 # trace-analyze.py subcommands
 check_output "trace-analyze.py --help" "summary" python3 "$SCRIPT_DIR/trace-analyze.py" --help
 for sub in summary timeline calltree collapsed flamegraph diff info; do
     check_output "trace-analyze.py $sub --help" "trace" python3 "$SCRIPT_DIR/trace-analyze.py" "$sub" --help
+done
+
+# trace-shader.py subcommands
+for sub in info hotspots callsites collapsed flamegraph; do
+    check_output "trace-shader.py $sub --help" "trace" python3 "$SCRIPT_DIR/trace-shader.py" "$sub" --help
 done
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -158,6 +200,23 @@ if [ "$MODE" = "toc" ]; then
     <target>
       <process type="launched" name="MyGame" pid="4242"/>
     </target>
+    <info>
+      <summary>
+        <intruments-recording-settings>
+          <instrument name="Metal Application">
+            <array>
+              <dictionary>
+                <key name="GPU">
+                  <value>Counter Set: Demo</value>
+                  <value>Shader Timeline: Enabled</value>
+                  <value>Induced GPU Performance State: Default</value>
+                </key>
+              </dictionary>
+            </array>
+          </instrument>
+        </intruments-recording-settings>
+      </summary>
+    </info>
   </run>
 </trace-toc>
 XML
@@ -188,13 +247,115 @@ XML
 XML
     ;;
 
+  *metal-application-command-buffer-submissions*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><start-time>1000</start-time><duration>120000000</duration><duration>90000000</duration><uint32>1</uint32><uint32>1</uint32><process fmt="MyGame (4242)"/><thread fmt="Main Thread"/><narrative fmt="Committed &quot; Frame 1 &quot; with 1 encoders"/><metal-command-buffer-id>111</metal-command-buffer-id></row>
+    <row><start-time>2000</start-time><duration>180000000</duration><duration>150000000</duration><uint32>1</uint32><uint32>2</uint32><process fmt="MyGame (4242)"/><thread fmt="Main Thread"/><narrative fmt="Committed &quot; Frame 2 &quot; with 1 encoders"/><metal-command-buffer-id>222</metal-command-buffer-id></row>
+    <row><start-time>3000</start-time><duration>50000000</duration><duration>40000000</duration><uint32>1</uint32><uint32>3</uint32><process fmt="WindowServer (100)"/><thread fmt="Compositor"/><narrative fmt="Committed &quot; WS &quot; with 1 encoders"/><metal-command-buffer-id>333</metal-command-buffer-id></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *metal-application-encoders-list*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><start-time>1100</start-time><duration>90000000</duration><thread fmt="Main Thread"/><process fmt="MyGame (4242)"/><gpu-frame-number fmt="Frame 1">1</gpu-frame-number><metal-object-label fmt="Frame 1">Frame 1</metal-object-label><metal-object-label fmt="[0] Frame 1">[0] Frame 1</metal-object-label><metal-object-label fmt="computeKernel">computeKernel</metal-object-label><metal-object-label fmt="[0] computeKernel">[0] computeKernel</metal-object-label><metal-event-name fmt="Encoding">Encoding</metal-event-name><metal-command-buffer-id>111</metal-command-buffer-id><metal-command-buffer-id>911</metal-command-buffer-id></row>
+    <row><start-time>2100</start-time><duration>150000000</duration><thread fmt="Main Thread"/><process fmt="MyGame (4242)"/><gpu-frame-number fmt="Frame 2">2</gpu-frame-number><metal-object-label fmt="Frame 2">Frame 2</metal-object-label><metal-object-label fmt="[0] Frame 2">[0] Frame 2</metal-object-label><metal-object-label fmt="computeKernel">computeKernel</metal-object-label><metal-object-label fmt="[0] computeKernel">[0] computeKernel</metal-object-label><metal-event-name fmt="Encoding">Encoding</metal-event-name><metal-command-buffer-id>222</metal-command-buffer-id><metal-command-buffer-id>922</metal-command-buffer-id></row>
+    <row><start-time>3100</start-time><duration>40000000</duration><thread fmt="Compositor"/><process fmt="WindowServer (100)"/><gpu-frame-number fmt="Frame 3">3</gpu-frame-number><metal-object-label fmt="WS">WS</metal-object-label><metal-object-label fmt="[0] WS">[0] WS</metal-object-label><metal-object-label fmt="blit">blit</metal-object-label><metal-object-label fmt="[0] blit">[0] blit</metal-object-label><metal-event-name fmt="Encoding">Encoding</metal-event-name><metal-command-buffer-id>333</metal-command-buffer-id><metal-command-buffer-id>933</metal-command-buffer-id></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *metal-command-buffer-completed*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><start-time>401000000</start-time><metal-command-buffer-id>111</metal-command-buffer-id></row>
+    <row><start-time>602000000</start-time><metal-command-buffer-id>222</metal-command-buffer-id></row>
+    <row><start-time>700000000</start-time><metal-command-buffer-id>333</metal-command-buffer-id></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *metal-shader-profiler-shader-list*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><start-time>1234</start-time><metal-object-label fmt="computeKernel (2)">computeKernel (2)</metal-object-label><metal-object-label fmt="mainLoop">mainLoop</metal-object-label><metal-object-label fmt="ComputePipeline">ComputePipeline</metal-object-label><uint64>2</uint64><uint64>4096</uint64><uint64>4608</uint64><string fmt="Compute">Compute</string><process fmt="MyGame (4242)"/></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *metal-shader-profiler-intervals*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><start-time>100000000</start-time><duration>300000</duration><metal-object-label fmt="computeKernel (2)">computeKernel (2)</metal-object-label><metal-object-label fmt="mainLoop">mainLoop</metal-object-label><metal-object-label fmt="ComputePipeline">ComputePipeline</metal-object-label><metal-object-label fmt="Compute">Compute</metal-object-label><gpu-event-name fmt="ShaderTimeline">ShaderTimeline</gpu-event-name><percent fmt="75.0%">75.0</percent><percent fmt="50.0%">50.0</percent><process fmt="MyGame (4242)"/><metal-device-name fmt="M4 Max">M4 Max</metal-device-name><gpu-channel-name fmt="Compute">Compute</gpu-channel-name><metal-nesting-level fmt="0">0</metal-nesting-level></row>
+    <row><start-time>120000000</start-time><duration>120000</duration><metal-object-label fmt="computeKernel (2)">computeKernel (2)</metal-object-label><metal-object-label fmt="helper">helper</metal-object-label><metal-object-label fmt="ComputePipeline">ComputePipeline</metal-object-label><metal-object-label fmt="Compute">Compute</metal-object-label><gpu-event-name fmt="ShaderTimeline">ShaderTimeline</gpu-event-name><percent fmt="25.0%">25.0</percent><percent fmt="15.0%">15.0</percent><process fmt="MyGame (4242)"/><metal-device-name fmt="M4 Max">M4 Max</metal-device-name><gpu-channel-name fmt="Compute">Compute</gpu-channel-name><metal-nesting-level fmt="1">1</metal-nesting-level></row>
+    <row><start-time>130000000</start-time><duration>90000</duration><metal-object-label fmt="WindowServerShader (9)">WindowServerShader (9)</metal-object-label><metal-object-label fmt="wsMain">wsMain</metal-object-label><metal-object-label fmt="WS">WS</metal-object-label><metal-object-label fmt="Fragment">Fragment</metal-object-label><gpu-event-name fmt="ShaderTimeline">ShaderTimeline</gpu-event-name><percent fmt="10.0%">10.0</percent><percent fmt="5.0%">5.0</percent><process fmt="WindowServer (100)"/><metal-device-name fmt="M4 Max">M4 Max</metal-device-name><gpu-channel-name fmt="Fragment">Fragment</gpu-channel-name><metal-nesting-level fmt="0">0</metal-nesting-level></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *gpu-shader-profiler-interval*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><start-time>100000000</start-time><duration>160000</duration><uint64>4128</uint64><uint32>1</uint32><uint32>0</uint32></row>
+    <row><start-time>120000000</start-time><duration>80000</duration><uint64>4184</uint64><uint32>1</uint32><uint32>0</uint32></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *gpu-shader-profiler-sample*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><event-time>100000000</event-time><uint64-array><uint64>4096</uint64><uint64>4128</uint64><uint64>4184</uint64></uint64-array><uint32>3</uint32></row>
+    <row><event-time>110000000</event-time><uint64-array><uint64>4096</uint64><uint64>4128</uint64></uint64-array><uint32>2</uint32></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *os-signpost*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><event-time>1000</event-time><process fmt="MyGame (4242)"/><event-type fmt="Event">Event</event-type><signpost-name fmt="FunctionCompiled">FunctionCompiled</signpost-name><os-log-metadata fmt="Name= computeKernel Label= mainLoop Type= compute ID= 0 UniqueID= 2 RequestHash= demo Addr= 4,096 Size= 512">Name= computeKernel Label= mainLoop Type= compute ID= 0 UniqueID= 2 RequestHash= demo Addr= 4,096 Size= 512</os-log-metadata></row>
+    <row><event-time>1200</event-time><process fmt="MyGame (4242)"/><event-type fmt="Event">Event</event-type><signpost-name fmt="ComputePipelineLabel">ComputePipelineLabel</signpost-name><os-log-metadata fmt="Label= ComputePipeline ID= 2">Label= ComputePipeline ID= 2</os-log-metadata></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
+  *gpu-performance-state-intervals*)
+    cat <<'XML'
+<trace-query-result>
+  <node>
+    <row><duration>700000000</duration><gpu-performance-state fmt="Minimum">Minimum</gpu-performance-state></row>
+    <row><duration>300000000</duration><gpu-performance-state fmt="Medium">Medium</gpu-performance-state></row>
+  </node>
+</trace-query-result>
+XML
+    ;;
+
   *metal-gpu-intervals*)
     cat <<'XML'
 <trace-query-result>
   <node>
-    <row><duration>200000000</duration><process fmt="MyGame (4242)"/></row>
-    <row><duration>300000000</duration><process fmt="MyGame (4242)"/></row>
-    <row><duration>500000000</duration><process fmt="WindowServer (100)"/></row>
+    <row><start-time>100000000</start-time><duration>200000000</duration><duration>10000000</duration><gpu-channel-name fmt="Compute">Compute</gpu-channel-name><formatted-label fmt="Frame 1:computeKernel">Frame 1:computeKernel</formatted-label><process fmt="MyGame (4242)"/><metal-command-buffer-id>111</metal-command-buffer-id><metal-command-buffer-id>911</metal-command-buffer-id></row>
+    <row><start-time>200000000</start-time><duration>300000000</duration><duration>20000000</duration><gpu-channel-name fmt="Compute">Compute</gpu-channel-name><formatted-label fmt="Frame 2:computeKernel">Frame 2:computeKernel</formatted-label><process fmt="MyGame (4242)"/><metal-command-buffer-id>222</metal-command-buffer-id><metal-command-buffer-id>922</metal-command-buffer-id></row>
+    <row><start-time>300000000</start-time><duration>500000000</duration><duration>5000000</duration><gpu-channel-name fmt="Blit">Blit</gpu-channel-name><formatted-label fmt="WS:blit">WS:blit</formatted-label><process fmt="WindowServer (100)"/><metal-command-buffer-id>333</metal-command-buffer-id><metal-command-buffer-id>933</metal-command-buffer-id></row>
   </node>
 </trace-query-result>
 XML
@@ -207,6 +368,7 @@ esac
 EOF
 
 chmod +x "$MOCK_XCTRACE"
+: > /tmp/mock.trace
 
 GPU_JSON=$(tmpfile .json)
 if PATH="$MOCK_XCTRACE_DIR:$PATH" python3 "$SCRIPT_DIR/trace-gpu.py" /tmp/mock.trace --json > "$GPU_JSON" 2>/dev/null; then
@@ -219,7 +381,12 @@ check "trace-gpu.py JSON valid" python3 -c "import json; json.load(open('$GPU_JS
 check "trace-gpu.py target process detection" python3 -c "import json; d=json.load(open('$GPU_JSON')); assert d['target_name'] == 'MyGame' and d['target_pid'] == '4242'"
 check "trace-gpu.py active ratio" python3 -c "import json, math; d=json.load(open('$GPU_JSON')); assert math.isclose(d['gpu_states']['active_ratio'], 2/3, rel_tol=1e-3)"
 check "trace-gpu.py command buffer count" python3 -c "import json; d=json.load(open('$GPU_JSON')); assert d['app_intervals']['command_buffers']['count'] == 2"
+check "trace-gpu.py submission count" python3 -c "import json; d=json.load(open('$GPU_JSON')); assert d['command_buffer_submissions']['count'] == 2"
+check "trace-gpu.py encoder count" python3 -c "import json; d=json.load(open('$GPU_JSON')); assert d['encoders']['count'] == 2"
+check "trace-gpu.py shader inventory" python3 -c "import json; d=json.load(open('$GPU_JSON')); assert d['shader_inventory']['unique_shaders'] == 1 and d['shader_inventory']['top_shaders'][0][0] == 'computeKernel'"
+check "trace-gpu.py lifecycle completion count" python3 -c "import json; d=json.load(open('$GPU_JSON')); assert d['command_buffer_lifecycle']['completed_count'] == 2 and d['command_buffer_lifecycle']['submitted_count'] == 2"
 check "trace-gpu.py ownership share" python3 -c "import json, math; d=json.load(open('$GPU_JSON')); assert math.isclose(d['gpu_intervals']['target_share'], 0.5, rel_tol=1e-3)"
+check "trace-gpu.py performance states" python3 -c "import json; d=json.load(open('$GPU_JSON')); assert d['performance_states']['available'] and d['performance_states']['by_state_ns']['Minimum'] == 700000000"
 
 GPU_JSON_FILTERED=$(tmpfile .json)
 if PATH="$MOCK_XCTRACE_DIR:$PATH" python3 "$SCRIPT_DIR/trace-gpu.py" /tmp/mock.trace --process windowserver --json > "$GPU_JSON_FILTERED" 2>/dev/null; then
@@ -228,6 +395,107 @@ else
     fail "trace-gpu.py --process override failed"
 fi
 check "trace-gpu.py process override filters app intervals" python3 -c "import json; d=json.load(open('$GPU_JSON_FILTERED')); assert d['app_intervals']['target_rows'] == 1"
+
+SHADER_JSON=$(tmpfile .json)
+if PATH="$MOCK_XCTRACE_DIR:$PATH" python3 "$SCRIPT_DIR/trace-shader.py" info /tmp/mock.trace --json > "$SHADER_JSON" 2>/dev/null; then
+    pass "trace-shader.py info runs with mocked xctrace"
+else
+    fail "trace-shader.py info failed with mocked xctrace"
+fi
+check "trace-shader.py JSON valid" python3 -c "import json; json.load(open('$SHADER_JSON'))"
+check "trace-shader.py detects shader timeline enabled" python3 -c "import json; d=json.load(open('$SHADER_JSON')); assert d['shader_timeline_setting'] is True"
+check "trace-shader.py compiled shader count" python3 -c "import json; d=json.load(open('$SHADER_JSON')); assert d['compiled_shaders'] >= 1 and 'computeKernel' in ''.join(d['shader_names'])"
+
+SHADER_HOT_JSON=$(tmpfile .json)
+if PATH="$MOCK_XCTRACE_DIR:$PATH" python3 "$SCRIPT_DIR/trace-shader.py" hotspots /tmp/mock.trace --json > "$SHADER_HOT_JSON" 2>/dev/null; then
+    pass "trace-shader.py hotspots --json"
+else
+    fail "trace-shader.py hotspots --json failed"
+fi
+check "trace-shader.py hotspots mode intervals" python3 -c "import json; d=json.load(open('$SHADER_HOT_JSON')); assert d['mode'] == 'intervals'"
+check "trace-shader.py hotspots top function label" python3 -c "import json; d=json.load(open('$SHADER_HOT_JSON')); assert d['rows'][0]['function_label'] == 'mainLoop' and d['rows'][0]['duration_ns'] == 300000"
+
+SHADER_CALLS=$(PATH="$MOCK_XCTRACE_DIR:$PATH" python3 "$SCRIPT_DIR/trace-shader.py" callsites /tmp/mock.trace --depth 5 2>&1 || true)
+if echo "$SHADER_CALLS" | grep -q '├\|└'; then pass "trace-shader.py callsites has tree chars"
+else fail "trace-shader.py callsites missing tree chars"; fi
+
+SHADER_COLLAPSED=$(PATH="$MOCK_XCTRACE_DIR:$PATH" python3 "$SCRIPT_DIR/trace-shader.py" collapsed /tmp/mock.trace 2>&1 || true)
+if echo "$SHADER_COLLAPSED" | grep -q ';'; then pass "trace-shader.py collapsed has semicolons"
+else fail "trace-shader.py collapsed missing semicolons"; fi
+
+SHADER_SVG=$(tmpfile .svg)
+if PATH="$MOCK_XCTRACE_DIR:$PATH" python3 "$SCRIPT_DIR/trace-shader.py" flamegraph /tmp/mock.trace -o "$SHADER_SVG" >/dev/null 2>&1; then
+    pass "trace-shader.py flamegraph runs"
+else
+    fail "trace-shader.py flamegraph failed"
+fi
+check_file "trace-shader.py flamegraph produces SVG" "$SHADER_SVG"
+check_output "trace-shader.py flamegraph SVG tag" "<svg" grep -n "<svg" "$SHADER_SVG"
+
+SHADER_SVG_WRAPPER=$(tmpfile .svg)
+if PATH="$MOCK_XCTRACE_DIR:$PATH" bash "$SCRIPT_DIR/trace-shader-flamegraph.sh" --tool builtin -o "$SHADER_SVG_WRAPPER" /tmp/mock.trace >/dev/null 2>&1; then
+    pass "trace-shader-flamegraph.sh runs"
+else
+    fail "trace-shader-flamegraph.sh failed"
+fi
+check_file "trace-shader-flamegraph.sh produces SVG" "$SHADER_SVG_WRAPPER"
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "━━━ 2c. GPU trace bundle parsing (mocked .gputrace) ━━━"
+# ══════════════════════════════════════════════════════════════════════════════
+
+MOCK_GPUTRACE=$(mktemp -d "/tmp/xtrace_mock_gputrace_XXXXXX.gputrace")
+CLEANUP_FILES+=("$MOCK_GPUTRACE")
+
+python3 - <<'PY' "$MOCK_GPUTRACE"
+import plistlib, struct, sys
+from pathlib import Path
+bundle = Path(sys.argv[1])
+(bundle / 'metadata').write_bytes(plistlib.dumps({
+    '(uuid)': 'MOCK-UUID',
+    'DYCaptureEngine.captured_frames_count': 1,
+    'DYCaptureSession.graphics_api': 1,
+}, fmt=plistlib.FMT_BINARY))
+(bundle / 'capture').write_bytes(b'MTSP\x00\x04\x00\x00Compute Values Buffer\x00MTLBuffer-7-0\x00Window Drawable Texture\x00CAMetalLayer-9-index-14\x00')
+(bundle / 'device-resources-demo').write_bytes(
+    b'MTSP\x00\x04\x00\x00buffers\x00buffer\x00MTLBuffer-7-0\x00Compute Values Buffer\x00'
+    b'textures\x00texture\x00MTLTexture-9-0-mipmap0-slice0\x00Offscreen Target Texture\x00'
+    b'functions\x00function\x00stressKernel\x00function\x00windowFragment\x00'
+)
+(bundle / 'index').write_bytes(b'xdic\x00\x00\x00\x00')
+(bundle / 'store0').write_bytes(b'\x78\x9c\x03\x00\x00\x00\x00\x01')
+(bundle / 'MTLBuffer-7-0').write_bytes(struct.pack('<8f', *[i * 0.5 for i in range(8)]))
+(bundle / 'MTLTexture-9-0-mipmap0-slice0').write_bytes(b'TEX' * 32)
+(bundle / 'CAMetalLayer-9-index-14').write_bytes(b'erutpac\x00Window Drawable Texture\x00')
+PY
+
+MOCK_GPUTRACE_JSON=$(tmpfile .json)
+if python3 "$SCRIPT_DIR/trace-gputrace.py" info "$MOCK_GPUTRACE" --json > "$MOCK_GPUTRACE_JSON" 2>/dev/null; then
+    pass "trace-gputrace.py info --json on mock bundle"
+else
+    fail "trace-gputrace.py info --json failed on mock bundle"
+fi
+check "trace-gputrace.py mock JSON valid" python3 -c "import json; json.load(open('$MOCK_GPUTRACE_JSON'))"
+check "trace-gputrace.py mock metadata parsed" python3 -c "import json; d=json.load(open('$MOCK_GPUTRACE_JSON')); assert d['metadata_summary']['uuid'] == 'MOCK-UUID' and d['metadata_summary']['graphics_api'] == 'Metal'"
+check "trace-gputrace.py mock resource counts" python3 -c "import json; d=json.load(open('$MOCK_GPUTRACE_JSON')); assert d['resources']['buffer_count'] == 1 and d['resources']['texture_count'] == 1 and d['resources']['surface_count'] == 1"
+check "trace-gputrace.py mock shader names" python3 -c "import json; d=json.load(open('$MOCK_GPUTRACE_JSON')); assert 'stressKernel' in d['resources']['shader_inventory']['functions'] and 'windowFragment' in d['resources']['shader_inventory']['functions']"
+
+check_output "trace-gputrace.py resources text output" "Compute Values Buffer" python3 "$SCRIPT_DIR/trace-gputrace.py" resources "$MOCK_GPUTRACE"
+check_output "trace-gputrace.py resources surfaces" "Window Drawable Texture" python3 "$SCRIPT_DIR/trace-gputrace.py" resources "$MOCK_GPUTRACE"
+check_output "trace-gputrace.py files output" "metadata" python3 "$SCRIPT_DIR/trace-gputrace.py" files "$MOCK_GPUTRACE"
+check_output "trace-gputrace.py strings output" "stressKernel" python3 "$SCRIPT_DIR/trace-gputrace.py" strings "$MOCK_GPUTRACE" --limit 20
+check_output "trace-gputrace.py buffer decode" "[     0] 0" python3 "$SCRIPT_DIR/trace-gputrace.py" buffer "$MOCK_GPUTRACE" --buffer "Compute Values Buffer" --layout float --index 0-2
+check_output "trace-gputrace.py buffer stats" "field0:" python3 "$SCRIPT_DIR/trace-gputrace.py" buffer "$MOCK_GPUTRACE" --buffer "MTLBuffer-7-0" --layout float --index 0-2
+
+MOCK_GPUTRACE_REPORT=$(tmpfile .html)
+if python3 "$SCRIPT_DIR/trace-gputrace.py" report "$MOCK_GPUTRACE" -o "$MOCK_GPUTRACE_REPORT" >/dev/null 2>&1; then
+    pass "trace-gputrace.py report runs"
+else
+    fail "trace-gputrace.py report failed"
+fi
+check_file "trace-gputrace.py report produces HTML" "$MOCK_GPUTRACE_REPORT"
+check_output "trace-gputrace.py report has title" "GPU Trace Report" grep -n "GPU Trace Report" "$MOCK_GPUTRACE_REPORT"
 
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""
@@ -243,10 +511,14 @@ check_exit "trace-analyze.py no subcommand → error" 1 python3 "$SCRIPT_DIR/tra
 check_exit "trace-analyze.py summary nonexistent → error" 1 python3 "$SCRIPT_DIR/trace-analyze.py" summary /nonexistent.trace
 check_exit "trace-analyze.py diff bad json → error" 1 python3 "$SCRIPT_DIR/trace-analyze.py" diff /dev/null /dev/null
 check_exit "trace-gpu.py nonexistent trace → error" 1 python3 "$SCRIPT_DIR/trace-gpu.py" /nonexistent.trace
+check_exit "trace-gputrace.py nonexistent bundle → error" 1 python3 "$SCRIPT_DIR/trace-gputrace.py" info /nonexistent.gputrace
+check_exit "trace-shader.py nonexistent trace → error" 1 python3 "$SCRIPT_DIR/trace-shader.py" info /nonexistent.trace
+check_exit "trace-shader-speedscope.sh no trace → error" 1 bash "$SCRIPT_DIR/trace-shader-speedscope.sh"
 
 check_output "trace-record.sh bad template → error" "Unknown template" bash "$SCRIPT_DIR/trace-record.sh" -t "Nonexistent Template" -d 1 -- /usr/bin/true
 check_output "trace-flamegraph.sh nonexistent trace → error" "not found" bash "$SCRIPT_DIR/trace-flamegraph.sh" /nonexistent.trace
 check_output "trace-speedscope.sh nonexistent trace → error" "not found" bash "$SCRIPT_DIR/trace-speedscope.sh" /nonexistent.trace
+check_output "trace-shader-speedscope.sh nonexistent trace → error" "not found" bash "$SCRIPT_DIR/trace-shader-speedscope.sh" /nonexistent.trace
 
 # ══════════════════════════════════════════════════════════════════════════════
 echo ""

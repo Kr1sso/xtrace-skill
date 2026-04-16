@@ -13,6 +13,10 @@ Record an Instruments trace using xctrace.
 
 Options:
   -t, --template NAME     Template name (default: 'Time Profiler')
+  -i, --instrument NAME   Add Instrument by name (repeatable). If provided without -t,
+                          records a custom instrument set instead of the default template.
+  --shader-timeline       Enable Metal Shader Timeline by patching a GPU template on the fly.
+                          Best with: -t 'Metal System Trace' or -t 'Game Performance'.
   -d, --duration SECONDS  Time limit (default: 10s). Accepts: 10, 10s, 2.5s, 500ms, 10m
   -o, --output PATH       Output .trace path (auto-generated if omitted)
   -p, --pid PID           Attach to process by PID
@@ -35,6 +39,9 @@ Examples:
   trace-record.sh --wait-for MyApp -d 10       # wait for MyApp to spawn, then profile
   trace-record.sh -t 'Processor Trace' -d 3 -- ./my_binary
   trace-record.sh -e DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib -- ./app
+  trace-record.sh --instrument GPU --instrument 'Metal Application' -d 10 -- ./my_metal_app
+  trace-record.sh -t 'Game Performance' --instrument 'Metal GPU Counters' -- ./my_game
+  trace-record.sh -t 'Metal System Trace' --shader-timeline -d 10 -- ./my_shader_app
 
 Notes:
   - xctrace requires absolute paths for launched binaries (auto-resolved).
@@ -46,6 +53,8 @@ EOF
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 TEMPLATE="Time Profiler"
+TEMPLATE_EXPLICIT=false
+INSTRUMENTS=()
 DURATION="10s"
 OUTPUT=""
 PID=""
@@ -56,6 +65,9 @@ ALL_PROCS=false
 ENV_VARS=()
 FORWARD_STDOUT=false
 FORWARD_STDERR=false
+SHADER_TIMELINE=false
+BASE_TEMPLATE=""
+TEMPLATE_PATCH_TEMP=""
 MALLOC_LOGGING=auto
 LAUNCH_CMD=()
 SUDO_PREFIX=()
@@ -64,7 +76,9 @@ SUDO_PREFIX=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -t|--template)
-            TEMPLATE="$2"; shift 2 ;;
+            TEMPLATE="$2"; TEMPLATE_EXPLICIT=true; shift 2 ;;
+        -i|--instrument)
+            INSTRUMENTS+=("$2"); shift 2 ;;
         -d|--duration)
             DURATION="$2"; shift 2 ;;
         -o|--output)
@@ -81,6 +95,8 @@ while [[ $# -gt 0 ]]; do
             ALL_PROCS=true; shift ;;
         -e|--env)
             ENV_VARS+=("$2"); shift 2 ;;
+        --shader-timeline)
+            SHADER_TIMELINE=true; shift ;;
         --malloc-logging)
             MALLOC_LOGGING=true; shift ;;
         --no-malloc-logging)
@@ -156,13 +172,99 @@ if ! command -v xctrace &>/dev/null; then
     exit 1
 fi
 
-# ── Validate template ───────────────────────────────────────────────────────
-if ! xctrace list templates 2>/dev/null | grep -F "$TEMPLATE" >/dev/null; then
-    echo "Error: Unknown template '$TEMPLATE'" >&2
-    echo "" >&2
-    echo "Available templates:" >&2
-    xctrace list templates 2>&1 >&2
-    exit 1
+resolve_template_path() {
+    local template="$1"
+    local developer_dir instruments_app found
+
+    if [ -f "$template" ]; then
+        realpath "$template" 2>/dev/null || echo "$template"
+        return 0
+    fi
+
+    developer_dir=$(xcode-select -p 2>/dev/null || true)
+    if [ -n "$developer_dir" ]; then
+        instruments_app="$(cd "$developer_dir/.." 2>/dev/null && pwd)/Applications/Instruments.app"
+        if [ -d "$instruments_app" ]; then
+            found=$(find "$instruments_app" -type f -name "$template.tracetemplate" 2>/dev/null | head -1 || true)
+            if [ -n "$found" ]; then
+                echo "$found"
+                return 0
+            fi
+        fi
+    fi
+
+    instruments_app="/Applications/Xcode.app/Contents/Applications/Instruments.app"
+    found=$(find "$instruments_app" -type f -name "$template.tracetemplate" 2>/dev/null | head -1 || true)
+    if [ -n "$found" ]; then
+        echo "$found"
+        return 0
+    fi
+
+    return 1
+}
+
+enable_shader_timeline_template() {
+    local base_template="$1"
+    local helper_dir helper patched_name patched_template
+
+    helper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    TEMPLATE_PATCH_TEMP=$(mktemp -d "/tmp/trace-template.XXXXXX")
+    patched_name="$(basename "$base_template" .tracetemplate)_shader_timeline.tracetemplate"
+    patched_template="$TEMPLATE_PATCH_TEMP/$patched_name"
+
+    python3 "$helper_dir/trace-template.py" enable-shader-timeline "$base_template" -o "$patched_template" --quiet
+    echo "$patched_template"
+}
+
+# If custom instruments were provided without an explicit template, let xctrace
+# build a custom recording from the instrument set alone.
+if [ ${#INSTRUMENTS[@]} -gt 0 ] && [ "$TEMPLATE_EXPLICIT" = false ]; then
+    TEMPLATE=""
+fi
+
+# Shader timeline needs a Metal-capable template. If the caller asked for it but
+# didn't choose a template explicitly, default to Metal System Trace.
+if [ "$SHADER_TIMELINE" = true ] && [ -z "$TEMPLATE" ]; then
+    TEMPLATE="Metal System Trace"
+fi
+
+# ── Validate template / instruments ─────────────────────────────────────────
+if [ -n "$TEMPLATE" ]; then
+    if [ ! -e "$TEMPLATE" ] && ! xctrace list templates 2>/dev/null | grep -F "$TEMPLATE" >/dev/null; then
+        echo "Error: Unknown template '$TEMPLATE'" >&2
+        echo "" >&2
+        echo "Available templates:" >&2
+        xctrace list templates 2>&1 >&2
+        exit 1
+    fi
+fi
+
+if [ "$SHADER_TIMELINE" = true ]; then
+    if [ -z "$TEMPLATE" ]; then
+        echo "Error: --shader-timeline requires a Metal-capable template." >&2
+        echo "  Try: -t 'Metal System Trace' or -t 'Game Performance'" >&2
+        exit 1
+    fi
+
+    BASE_TEMPLATE=$(resolve_template_path "$TEMPLATE" || true)
+    if [ -z "$BASE_TEMPLATE" ]; then
+        echo "Error: Could not resolve template path for '$TEMPLATE' to enable shader timeline." >&2
+        exit 1
+    fi
+    TEMPLATE=$(enable_shader_timeline_template "$BASE_TEMPLATE")
+fi
+
+if [ ${#INSTRUMENTS[@]} -gt 0 ]; then
+    INSTRUMENT_LIST=$(xctrace list instruments 2>/dev/null || true)
+    for INSTRUMENT in "${INSTRUMENTS[@]}"; do
+        if ! printf '%s\n' "$INSTRUMENT_LIST" | grep -F "$INSTRUMENT" >/dev/null; then
+            echo "Error: Unknown instrument '$INSTRUMENT'" >&2
+            echo "" >&2
+            echo "Available instruments:" >&2
+            xctrace list instruments 2>&1 >&2
+            exit 1
+        fi
+    done
 fi
 
 # ── Parse duration ───────────────────────────────────────────────────────────
@@ -266,7 +368,17 @@ if [ -z "$OUTPUT" ]; then
 fi
 
 # ── Build xctrace command ───────────────────────────────────────────────────
-CMD=(xctrace record --template "$TEMPLATE" --time-limit "$DURATION" --output "$OUTPUT" --no-prompt)
+CMD=(xctrace record --time-limit "$DURATION" --output "$OUTPUT" --no-prompt)
+
+if [ -n "$TEMPLATE" ]; then
+    CMD+=(--template "$TEMPLATE")
+fi
+
+if [ ${#INSTRUMENTS[@]} -gt 0 ]; then
+    for INSTRUMENT in "${INSTRUMENTS[@]}"; do
+        CMD+=(--instrument "$INSTRUMENT")
+    done
+fi
 
 if [ ${#ENV_VARS[@]} -gt 0 ]; then
     for ENV in "${ENV_VARS[@]}"; do
@@ -288,7 +400,23 @@ else
 fi
 
 # ── Print plan ───────────────────────────────────────────────────────────────
-echo "Recording with '$TEMPLATE' for $DURATION..." >&2
+DISPLAY_TEMPLATE="$TEMPLATE"
+if [ -n "$BASE_TEMPLATE" ]; then
+    DISPLAY_TEMPLATE="$BASE_TEMPLATE"
+fi
+if [ "$SHADER_TIMELINE" = true ]; then
+    DISPLAY_TEMPLATE="$DISPLAY_TEMPLATE + Shader Timeline"
+fi
+
+if [ -n "$TEMPLATE" ] && [ ${#INSTRUMENTS[@]} -gt 0 ]; then
+    echo "Recording with template '$DISPLAY_TEMPLATE' + instruments (${INSTRUMENTS[*]}) for $DURATION..." >&2
+elif [ -n "$TEMPLATE" ]; then
+    echo "Recording with '$DISPLAY_TEMPLATE' for $DURATION..." >&2
+elif [ ${#INSTRUMENTS[@]} -gt 0 ]; then
+    echo "Recording with instruments (${INSTRUMENTS[*]}) for $DURATION..." >&2
+else
+    echo "Recording with default configuration for $DURATION..." >&2
+fi
 echo "Output: $OUTPUT" >&2
 echo "Command: ${CMD[*]}" >&2
 echo "" >&2
@@ -332,6 +460,9 @@ _cleanup() {
         wait $kids 2>/dev/null || true
     fi
     rm -f "$XCTRACE_OUTPUT_FILE"
+    if [ -n "$TEMPLATE_PATCH_TEMP" ] && [ -d "$TEMPLATE_PATCH_TEMP" ]; then
+        rm -rf "$TEMPLATE_PATCH_TEMP"
+    fi
 }
 trap _cleanup EXIT INT TERM
 
@@ -404,18 +535,53 @@ if [ -n "$TARGET_PID" ]; then
 fi
 
 # Print size info to stderr
+HAS_METAL_INSTRUMENTS=false
+for INSTRUMENT in "${INSTRUMENTS[@]-}"; do
+    LOWER_INSTRUMENT=$(printf '%s' "$INSTRUMENT" | tr '[:upper:]' '[:lower:]')
+    case "$LOWER_INSTRUMENT" in
+        *metal*|*gpu*|*realitykit*)
+            HAS_METAL_INSTRUMENTS=true
+            break
+            ;;
+    esac
+done
+
 TRACE_SIZE=$(du -sh "$ACTUAL_OUTPUT" 2>/dev/null | cut -f1)
+ANALYZE_TEMPLATE="$TEMPLATE"
+if [ -n "$BASE_TEMPLATE" ]; then
+    ANALYZE_TEMPLATE="$(basename "$BASE_TEMPLATE" .tracetemplate)"
+fi
+
 echo "" >&2
 echo "Trace saved: $ACTUAL_OUTPUT ($TRACE_SIZE)" >&2
-case "$TEMPLATE" in
+case "$ANALYZE_TEMPLATE" in
     Allocations|Leaks|"Game Memory")
         echo "Analyze with: trace-memory.py summary -- <command>" >&2
         echo "  Or attach: trace-memory.py summary -p <PID>" >&2
         echo "  Leak check: trace-memory.py leaks -- <command>" >&2
         echo "  Open in Instruments.app for full allocation details" >&2
         ;;
+    "Metal System Trace"|"Game Performance"|"Game Performance Overview"|"RealityKit Trace")
+        echo "Analyze with: trace-gpu.py \"$ACTUAL_OUTPUT\"" >&2
+        echo "  CPU side (when present): trace-analyze.py summary \"$ACTUAL_OUTPUT\"" >&2
+        if [ "$SHADER_TIMELINE" = true ]; then
+            echo "  Shader hotspots: trace-shader.py hotspots \"$ACTUAL_OUTPUT\"" >&2
+            echo "  Shader flamegraph: trace-shader-flamegraph.sh \"$ACTUAL_OUTPUT\" -o shader.svg" >&2
+            echo "  Shader speedscope: trace-shader-speedscope.sh \"$ACTUAL_OUTPUT\"" >&2
+        fi
+        ;;
     *)
-        echo "Analyze with: trace-analyze.py \"$ACTUAL_OUTPUT\"" >&2
+        if [ "$HAS_METAL_INSTRUMENTS" = true ]; then
+            echo "Analyze with: trace-gpu.py \"$ACTUAL_OUTPUT\"" >&2
+            echo "  CPU side (when present): trace-analyze.py summary \"$ACTUAL_OUTPUT\"" >&2
+            if [ "$SHADER_TIMELINE" = true ]; then
+                echo "  Shader hotspots: trace-shader.py hotspots \"$ACTUAL_OUTPUT\"" >&2
+                echo "  Shader flamegraph: trace-shader-flamegraph.sh \"$ACTUAL_OUTPUT\" -o shader.svg" >&2
+                echo "  Shader speedscope: trace-shader-speedscope.sh \"$ACTUAL_OUTPUT\"" >&2
+            fi
+        else
+            echo "Analyze with: trace-analyze.py \"$ACTUAL_OUTPUT\"" >&2
+        fi
         ;;
 esac
 

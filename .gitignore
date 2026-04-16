@@ -25,6 +25,8 @@ build/
 # Instruments traces
 *.trace
 *.trace/
+*.gputrace
+*.gputrace/
 
 # Swift Package Manager
 .build/

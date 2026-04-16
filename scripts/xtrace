@@ -32,12 +32,14 @@ and outputs the trace file path to stdout for piping.
 Options:
   -d DURATION       Recording duration: 10, 10s, 2.5s, 500ms (default: 30s, or until exit)
   -t TEMPLATE       Instruments template (default: 'Time Profiler')
+  --instrument STR  Add an Instruments instrument by name (repeatable)
+  --shader-timeline Enable Metal Shader Timeline by patching a GPU template on the fly
   --gpu             Shorthand for '-t "Metal System Trace"' + GPU summary
   --cpu             Shorthand for '-t "Time Profiler"'
   --gpu-process STR Optional process filter override for GPU summary
   -o PATH           Output .trace path (default: auto in /tmp)
   --no-summary      Skip auto-summary, just output trace path
-  --top N           Number of functions in CPU summary (default: 15)
+  --top N           Number of functions to show in CPU / shader summaries (default: 15)
   -h, --help        Show this help
 
 Pipe to other tools:
@@ -52,8 +54,11 @@ Memory profiling:
   xtrace -t Leaks ./app               # leak detection + trace
 
 GPU profiling:
-  xtrace --gpu ./app                  # Metal System Trace + GPU summary
+  xtrace --gpu ./app                           # Metal System Trace + GPU summary
   xtrace --gpu --gpu-process myapp ./app
+  xtrace --gpu --shader-timeline ./app         # enable Shader Timeline + shader tooling
+  xtrace -t 'Game Performance' ./app           # Game Performance template + Metal summary
+  xtrace --instrument GPU --instrument 'Metal Application' ./app
 
 EOF
     exit "${1:-1}"
@@ -61,6 +66,9 @@ EOF
 
 DURATION="30s"
 TEMPLATE="Time Profiler"
+TEMPLATE_EXPLICIT=false
+INSTRUMENTS=()
+SHADER_TIMELINE=false
 OUTPUT=""
 SUMMARIZE=true
 TOP=15
@@ -69,9 +77,11 @@ GPU_PROCESS_FILTER=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -d)            DURATION="$2"; shift 2 ;;
-        -t)            TEMPLATE="$2"; shift 2 ;;
-        --gpu)         TEMPLATE="Metal System Trace"; shift ;;
-        --cpu)         TEMPLATE="Time Profiler"; shift ;;
+        -t)            TEMPLATE="$2"; TEMPLATE_EXPLICIT=true; shift 2 ;;
+        --instrument)  INSTRUMENTS+=("$2"); shift 2 ;;
+        --shader-timeline) SHADER_TIMELINE=true; shift ;;
+        --gpu)         TEMPLATE="Metal System Trace"; TEMPLATE_EXPLICIT=true; shift ;;
+        --cpu)         TEMPLATE="Time Profiler"; TEMPLATE_EXPLICIT=true; shift ;;
         --gpu-process) GPU_PROCESS_FILTER="$2"; shift 2 ;;
         -o)            OUTPUT="$2"; shift 2 ;;
         --no-summary)  SUMMARIZE=false; shift ;;
@@ -105,12 +115,39 @@ _is_memory_template() {
     esac
 }
 
-_is_gpu_template() {
+_is_metal_template() {
     case "$1" in
-        "Metal System Trace") return 0 ;;
+        "Metal System Trace"|"Game Performance"|"Game Performance Overview"|"RealityKit Trace") return 0 ;;
         *) return 1 ;;
     esac
 }
+
+_has_metal_instruments() {
+    if [ ${#INSTRUMENTS[@]} -eq 0 ]; then
+        return 1
+    fi
+
+    local instrument lower
+    for instrument in "${INSTRUMENTS[@]}"; do
+        lower=$(printf '%s' "$instrument" | tr '[:upper:]' '[:lower:]')
+        case "$lower" in
+            *metal*|*gpu*|*realitykit*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# Match trace-record.sh semantics: if custom instruments were supplied without an
+# explicit template, let xctrace build a custom recording from those instruments.
+if [ ${#INSTRUMENTS[@]} -gt 0 ] && [ "$TEMPLATE_EXPLICIT" = false ]; then
+    TEMPLATE=""
+fi
+
+# If shader timeline was requested without choosing a Metal template explicitly,
+# switch from the default CPU template to Metal System Trace.
+if [ "$SHADER_TIMELINE" = true ] && [ "$TEMPLATE_EXPLICIT" = false ]; then
+    TEMPLATE="Metal System Trace"
+fi
 
 if _is_memory_template "$TEMPLATE" && [ ${#CMD[@]} -gt 0 ]; then
     # Memory template with launch mode — use trace-memory.py orchestration
@@ -175,7 +212,19 @@ if _is_memory_template "$TEMPLATE" && [ ${#CMD[@]} -gt 0 ]; then
 fi
 
 # Record — trace-record.sh prints path to stdout, progress to stderr
-TRACE_PATH=$("$SCRIPT_DIR/trace-record.sh" -t "$TEMPLATE" -d "$DURATION" -o "$OUTPUT" -- "${CMD[@]}")
+TRACE_RECORD_ARGS=(-d "$DURATION" -o "$OUTPUT")
+if [ -n "$TEMPLATE" ]; then
+    TRACE_RECORD_ARGS+=(-t "$TEMPLATE")
+fi
+if [ "$SHADER_TIMELINE" = true ]; then
+    TRACE_RECORD_ARGS+=(--shader-timeline)
+fi
+if [ ${#INSTRUMENTS[@]} -gt 0 ]; then
+    for instrument in "${INSTRUMENTS[@]}"; do
+        TRACE_RECORD_ARGS+=(--instrument "$instrument")
+    done
+fi
+TRACE_PATH=$("$SCRIPT_DIR/trace-record.sh" "${TRACE_RECORD_ARGS[@]}" -- "${CMD[@]}")
 
 if [ -z "$TRACE_PATH" ] || [ ! -e "$TRACE_PATH" ]; then
     echo "Error: Recording failed." >&2
@@ -186,7 +235,7 @@ FINAL_PATH="$TRACE_PATH"
 
 # Auto-summarize to stderr (and detect empty traces for fallback)
 if [ "$SUMMARIZE" = true ]; then
-    if _is_gpu_template "$TEMPLATE"; then
+    if _is_metal_template "$TEMPLATE" || _has_metal_instruments; then
         echo "" >&2
         if [ -n "$GPU_PROCESS_FILTER" ]; then
             python3 "$SCRIPT_DIR/trace-gpu.py" "$TRACE_PATH" --process "$GPU_PROCESS_FILTER" >&2 || true
@@ -194,11 +243,26 @@ if [ "$SUMMARIZE" = true ]; then
             python3 "$SCRIPT_DIR/trace-gpu.py" "$TRACE_PATH" >&2 || true
         fi
 
-        # Also show CPU-side hotspots from the embedded time-profile table when available.
+        if [ "$SHADER_TIMELINE" = true ]; then
+            echo "" >&2
+            set +e
+            SHADER_SUMMARY=$(python3 "$SCRIPT_DIR/trace-shader.py" hotspots "$TRACE_PATH" --top "$TOP" 2>&1)
+            SHADER_EXIT=$?
+            set -e
+            if [ -n "$SHADER_SUMMARY" ]; then
+                printf '%s\n' "$SHADER_SUMMARY" >&2
+            fi
+        fi
+
+        # Also show CPU-side hotspots from any embedded time-profile table when available.
         echo "" >&2
         set +e
-        python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top "$TOP" >&2 2>&1
+        METAL_CPU_SUMMARY=$(python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top "$TOP" 2>&1)
+        METAL_CPU_EXIT=$?
         set -e
+        if [ "$METAL_CPU_EXIT" -eq 0 ] && [ -n "$METAL_CPU_SUMMARY" ]; then
+            printf '%s\n' "$METAL_CPU_SUMMARY" >&2
+        fi
     else
         echo "" >&2
         set +e
@@ -242,9 +306,9 @@ if [ "$SUMMARIZE" = true ]; then
     fi
 else
     # With --no-summary, do a quick silent check and warn if empty.
-    # For GPU templates we intentionally skip CPU-empty fallback because
-    # Metal traces can be valid even with sparse CPU samples.
-    if ! _is_gpu_template "$TEMPLATE"; then
+    # For Metal/GPU traces we intentionally skip CPU-empty fallback because
+    # those traces can be valid even with sparse CPU samples.
+    if ! _is_metal_template "$TEMPLATE" && ! _has_metal_instruments; then
         set +e
         python3 "$SCRIPT_DIR/trace-analyze.py" summary "$TRACE_PATH" --top 1 --json >/dev/null 2>&1
         CHECK_EXIT=$?

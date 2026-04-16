@@ -30,13 +30,14 @@ fi
 mkdir -p "$INSTALL_DIR"
 echo -e "${BOLD}PATH:${NC} $INSTALL_DIR"
 
-SCRIPTS=(xtrace trace-record.sh trace-analyze.py trace-gpu.py trace-memory.py trace-flamegraph.sh
-         trace-speedscope.sh trace-diff-flamegraph.sh trace-check.sh sample-quick.sh)
+SCRIPTS=(xtrace trace-record.sh trace-template.py trace-analyze.py trace-gpu.py trace-gputrace.py trace-shader.py
+         trace-memory.py trace-flamegraph.sh trace-shader-flamegraph.sh trace-speedscope.sh trace-shader-speedscope.sh
+         trace-diff-flamegraph.sh trace-check.sh sample-quick.sh)
 
 for script in "${SCRIPTS[@]}"; do
     SRC="$SCRIPT_DIR/scripts/$script"
     case "$script" in
-        xtrace|trace-analyze.py|trace-gpu.py|trace-memory.py) DEST_NAME="$script" ;;
+        xtrace|trace-template.py|trace-analyze.py|trace-gpu.py|trace-gputrace.py|trace-shader.py|trace-memory.py) DEST_NAME="$script" ;;
         *.sh) DEST_NAME="${script%.sh}" ;;
         *) DEST_NAME="$script" ;;
     esac
